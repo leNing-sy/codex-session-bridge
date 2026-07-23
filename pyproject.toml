@@ -1,12 +1,13 @@
 [project]
-name = "unisessions"
+name = "codex-session-bridge"
 version = "0.1.0"
-description = "Convert AI coding CLI sessions between Codex, Claude Code, Pi, OpenCode, Devin, Factory, and Windsurf Cascade. SDK, CLI, MCP chat recall, and trace export for fine-tuning."
+description = "Import OpenCode, Claude Code, and other AI coding sessions into Codex as visible, resumable desktop threads."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [
     {name = "vibheksoni"},
+    {name = "lening"},
 ]
 keywords = [
     "ai-cli",
@@ -54,15 +55,16 @@ fast = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/vibheksoni/session-export"
-Repository = "https://github.com/vibheksoni/session-export"
-Issues = "https://github.com/vibheksoni/session-export/issues"
+Homepage = "https://github.com/leNing-sy/codex-session-bridge"
+Repository = "https://github.com/leNing-sy/codex-session-bridge"
+Issues = "https://github.com/leNing-sy/codex-session-bridge/issues"
 
 [project.scripts]
+codex-bridge = "codex_bridge.cli:main"
 unisessions-mcp = "unisessions.mcp_server:main"
 
 [tool.setuptools]
-packages = ["session_sdk", "unisessions"]
+packages = ["codex_bridge", "session_sdk", "unisessions"]
 
 [tool.mypy]
 python_version = "3.11"

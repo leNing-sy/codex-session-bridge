@@ -3,5 +3,11 @@
 .*.json
 *.md
 !README.md
+!UPSTREAM.md
 !docs/**
 !mkdocs.yml
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+tests/.tmp/
