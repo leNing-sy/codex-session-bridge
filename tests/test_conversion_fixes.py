@@ -542,6 +542,83 @@ class ConvertScriptTests(unittest.TestCase):
                 self.script.CLAUDE_DESKTOP_DIR = original
             self.assertFalse(ok)
 
+    def _make_opencode_db(self, path: Path) -> None:
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            """
+            CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT,
+                time_created INTEGER, time_updated INTEGER, time_archived INTEGER);
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT,
+                time_created INTEGER, time_updated INTEGER, data TEXT);
+            CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
+                time_created INTEGER, time_updated INTEGER, data TEXT);
+            """
+        )
+        connection.execute(
+            "INSERT INTO session VALUES ('ses_1', '测试会话', 'C:/projects/demo', 1751364000000, 1751364100000, NULL)")
+        connection.execute(
+            "INSERT INTO message VALUES ('m1', 'ses_1', 1751364001000, 0, ?)",
+            (json.dumps({"role": "user"}),))
+        connection.execute(
+            "INSERT INTO part VALUES ('p1', 'm1', 'ses_1', 1751364001000, 0, ?)",
+            (json.dumps({"type": "text", "text": "帮我看看"}),))
+        connection.execute(
+            "INSERT INTO message VALUES ('m2', 'ses_1', 1751364002000, 0, ?)",
+            (json.dumps({"role": "assistant"}),))
+        connection.execute(
+            "INSERT INTO part VALUES ('p2', 'm2', 'ses_1', 1751364002000, 0, ?)",
+            (json.dumps({"type": "text", "text": "看好了"}),))
+        connection.execute(  # 非文本 part 应被忽略
+            "INSERT INTO part VALUES ('p3', 'm2', 'ses_1', 1751364003000, 0, ?)",
+            (json.dumps({"type": "tool", "name": "bash"}),))
+        connection.commit()
+        connection.close()
+
+    def test_opencode2codex_converts_live_db(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "opencode.db"
+            out = Path(tmp) / "out.jsonl"
+            self._make_opencode_db(db)
+            self.script.opencode_to_codex("ses_1", out_path=str(out),
+                                          install=False, db=str(db))
+            converted = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+            meta = converted[0]
+            self.assertEqual(meta["type"], "session_meta")
+            self.assertEqual(meta["payload"]["cwd"], "C:/projects/demo")
+            items = [r["payload"] for r in converted if r["type"] == "response_item"]
+            self.assertEqual(
+                [(p["role"], p["content"][0]["text"]) for p in items],
+                [("user", "帮我看看"), ("assistant", "看好了")],
+            )
+            events = [r["payload"]["type"] for r in converted if r["type"] == "event_msg"]
+            self.assertEqual(events, ["user_message", "agent_message"])
+
+    def test_codex2opencode_exports_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "rollout.jsonl"
+            out = Path(tmp) / "export.json"
+            records = [
+                {
+                    "timestamp": "2026-07-01T10:00:00.000Z",
+                    "type": "session_meta",
+                    "payload": {"id": "s1", "timestamp": "2026-07-01T10:00:00.000Z", "cwd": r"C:\projects\demo"},
+                },
+                _codex_user("<environment_context>ctx</environment_context>"),
+                _codex_user("问题"),
+                _codex_assistant("答案"),
+                _codex_user("悬空重复"),
+                _codex_user("悬空重复"),
+            ]
+            src.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+            self.script.codex_to_opencode(str(src), out_path=str(out))
+            export = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(export["info"]["title"], "问题")
+            self.assertEqual(export["info"]["directory"], r"C:\projects\demo")
+            texts = [(m["info"]["role"], m["parts"][0]["text"]) for m in export["messages"]]
+            self.assertEqual(texts, [("user", "问题"), ("assistant", "答案"), ("user", "悬空重复")])
+            assistant = export["messages"][1]["info"]
+            self.assertEqual(assistant["parentID"], export["messages"][0]["info"]["id"])
+
     def test_register_codex_thread_missing_database_is_noop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             original_home = self.script.HOME

@@ -5,8 +5,8 @@
 当前优先支持 **OpenCode -> Codex**。项目基于 UniSessions 的来源解析能力开发，但重写了 Codex 生成、安装、注册、验证和回滚流程。
 
 > **直接下载**：不想装 Python？去 [Releases 页面](../../releases/latest)下载
-> `session-convert.exe`（Windows 64 位，免安装），双击即进交互模式，支持
-> Codex <-> Claude 双向转换。exe 由 GitHub Actions 从源码自动构建（构建日志
+> `session-convert.exe`（Windows 64 位，免安装），双击即进交互模式，一个软件
+> 覆盖全部四个方向：Codex <-> Claude 双向、OpenCode -> Codex、Codex -> OpenCode。exe 由 GitHub Actions 从源码自动构建（构建日志
 > 公开可查）；未做代码签名，首次运行遇到 SmartScreen 提示时点
 > "更多信息 → 仍要运行"即可。
 
@@ -106,12 +106,13 @@ python -m venv .venv
 `--claude-session-dir` 指定其他位置。当前已通过合成 Claude Code JSONL 测试；在真实会话完成 Codex
 桌面端续聊验证前，该适配器保持预览状态。
 
-### 独立脚本：Codex <-> Claude 双向转换（scripts/）
+### 独立脚本：四方向转换（scripts/）
 
 [`scripts/session_convert.py`](scripts/session_convert.py) 是一个无依赖的单文件脚本，
 与 `codex_bridge` 互补：
 
-- 支持 **Codex -> Claude Code** 方向（`codex_bridge` 目前只做导入 Codex）；
+- 覆盖四个方向：Codex <-> Claude 双向、OpenCode -> Codex（直读活库）、
+  Codex -> OpenCode（导出文件 + `opencode import`）；
 - 保留工具调用、工具结果和推理摘要（转成 thinking 块），不只是纯文本回合；
 - 双向清理注入消息：Codex 侧过滤 AGENTS.md、`<environment_context>`、
   `<in-app-browser-context>` 等隐藏上下文并对恢复会话产生的重复输入去重，

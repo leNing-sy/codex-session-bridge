@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Claude Code <-> Codex 会话转换脚本
+Claude Code / Codex / OpenCode 会话转换脚本 (四方向)
 
-用法:
+用法 (不带参数运行进入交互菜单):
   python session_convert.py codex2claude <rollout.jsonl>      # Codex -> Claude
-  python session_convert.py codex2claude --latest             # 转换最新的 Codex 会话
   python session_convert.py claude2codex <session.jsonl>      # Claude -> Codex
-  python session_convert.py claude2codex --latest             # 转换最新的 Claude 会话
-  python session_convert.py list [codex|claude]               # 列出可转换的会话
+  python session_convert.py opencode2codex <ses_id>           # OpenCode -> Codex
+  python session_convert.py codex2opencode <rollout.jsonl>    # Codex -> OpenCode 导出
+  各命令均支持 --latest;  list [codex|claude|opencode] 列出可转换的会话
 
 默认把结果直接"安装"到目标工具的会话目录, 使其出现在对方的历史会话列表里;
 用 -o <文件> 可只输出到指定文件而不安装。
@@ -654,6 +654,267 @@ def claude_to_codex(src, out_path=None, install=True):
 
 
 # ---------------------------------------------------------------------------
+# OpenCode <-> Codex
+# ---------------------------------------------------------------------------
+
+OPENCODE_DB_CANDIDATES = (
+    os.path.join(HOME, ".local", "share", "opencode", "opencode.db"),
+    os.path.join(os.environ.get("APPDATA", ""), "opencode", "opencode.db"),
+    os.path.join(os.environ.get("LOCALAPPDATA", ""), "opencode", "opencode.db"),
+)
+
+
+def find_opencode_db():
+    for p in OPENCODE_DB_CANDIDATES:
+        if p and os.path.isfile(p):
+            return p
+    return None
+
+
+def _opencode_connect(db):
+    import sqlite3
+    conn = sqlite3.connect("file:%s?mode=ro" % db.replace("\\", "/"), uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def list_opencode_sessions(db, limit=15):
+    """[(id, title, directory, time_created_ms)] 按更新时间倒序"""
+    conn = _opencode_connect(db)
+    try:
+        rows = conn.execute(
+            """SELECT id, title, directory, time_created FROM session
+               WHERE time_archived IS NULL
+               ORDER BY time_updated DESC LIMIT ?""", (limit,)).fetchall()
+    finally:
+        conn.close()
+    return [(r["id"], r["title"] or "", r["directory"] or "",
+             int(r["time_created"] or 0)) for r in rows]
+
+
+def load_opencode_conversation(db, session_id):
+    """读活库(只读) -> (meta字典, [(role, text, ts_iso)])"""
+    conn = _opencode_connect(db)
+    try:
+        sess = conn.execute("SELECT * FROM session WHERE id = ?",
+                            (session_id,)).fetchone()
+        if sess is None:
+            sys.exit("OpenCode 会话不存在: %s" % session_id)
+        messages = conn.execute(
+            "SELECT * FROM message WHERE session_id = ? ORDER BY time_created, id",
+            (session_id,)).fetchall()
+        parts = conn.execute(
+            "SELECT * FROM part WHERE session_id = ? ORDER BY time_created, id",
+            (session_id,)).fetchall()
+    finally:
+        conn.close()
+
+    text_by_msg = {}
+    for row in parts:
+        try:
+            data = json.loads(row["data"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and data.get("type") == "text":
+            text = data.get("text")
+            if isinstance(text, str) and text.strip():
+                text_by_msg.setdefault(row["message_id"], []).append(text.strip())
+
+    conv = []
+    for row in messages:
+        try:
+            data = json.loads(row["data"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        role = data.get("role") if isinstance(data, dict) else None
+        if role not in ("user", "assistant"):
+            continue
+        text = "\n\n".join(text_by_msg.get(row["id"], [])).strip()
+        if not text:
+            continue
+        ts_ms = int(row["time_created"] or 0)
+        ts = datetime.fromtimestamp(ts_ms / 1000, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z" if ts_ms else now_iso()
+        conv.append((role, text, ts))
+
+    meta = {"id": sess["id"], "title": sess["title"] or "",
+            "directory": sess["directory"] or os.getcwd(),
+            "time_created": int(sess["time_created"] or 0)}
+    return meta, conv
+
+
+def opencode_to_codex(session_id=None, out_path=None, install=True, db=None):
+    db = db or find_opencode_db()
+    if not db:
+        sys.exit("找不到 OpenCode 数据库 (尝试过: %s)" % "; ".join(OPENCODE_DB_CANDIDATES))
+    if session_id is None:  # --latest
+        sessions = list_opencode_sessions(db, limit=1)
+        if not sessions:
+            sys.exit("OpenCode 里没有会话")
+        session_id = sessions[0][0]
+        print("使用最新 OpenCode 会话: %s" % session_id)
+    meta, conv = load_opencode_conversation(db, session_id)
+    if not conv:
+        sys.exit("没有可转换的对话内容: %s" % session_id)
+
+    cwd = meta["directory"]
+    new_id = str(uuid.uuid4())
+    start_ms = meta["time_created"] or int(
+        datetime.now(timezone.utc).timestamp() * 1000)
+    start_dt = datetime.fromtimestamp(start_ms / 1000, timezone.utc)
+    start_ts = start_dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+    out = [{"timestamp": start_ts, "type": "session_meta", "payload": {
+        "session_id": new_id, "id": new_id, "timestamp": start_ts,
+        "cwd": cwd, "originator": "session_convert",
+        "cli_version": "converted-from-opencode", "source": "import",
+        "thread_source": "user", "model_provider": "custom",
+    }}]
+    first_user_text = None
+    for role, text, ts in conv:
+        if role == "user":
+            if first_user_text is None:
+                first_user_text = text
+            out.append({"timestamp": ts, "type": "event_msg", "payload": {
+                "type": "user_message", "message": text,
+                "images": [], "local_images": [], "audio": [],
+                "local_audio": [], "text_elements": []}})
+            out.append({"timestamp": ts, "type": "response_item", "payload": {
+                "type": "message", "id": "msg_" + uuid.uuid4().hex[:24],
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}]}})
+        else:
+            out.append({"timestamp": ts, "type": "event_msg", "payload": {
+                "type": "agent_message", "message": text, "phase": "final"}})
+            out.append({"timestamp": ts, "type": "response_item", "payload": {
+                "type": "message", "id": "msg_" + uuid.uuid4().hex[:24],
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}]}})
+
+    if install and out_path is None:
+        day_dir = os.path.join(CODEX_SESSIONS_DIR, start_dt.strftime("%Y"),
+                               start_dt.strftime("%m"), start_dt.strftime("%d"))
+        out_path = os.path.join(day_dir, "rollout-%s-%s.jsonl" % (
+            start_dt.strftime("%Y-%m-%dT%H-%M-%S"), new_id))
+    if out_path is None:
+        out_path = session_id + ".codex.jsonl"
+    write_jsonl(out_path, out)
+
+    registered = False
+    if install and out_path.startswith(CODEX_SESSIONS_DIR):
+        title = (meta["title"] or first_user_text or "imported from opencode"
+                 ).strip().splitlines()[0][:60]
+        with open(CODEX_INDEX_FILE, "a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps({"id": new_id, "thread_name": title,
+                                "updated_at": now_iso()},
+                               ensure_ascii=False) + "\n")
+        preview = (first_user_text or title).strip()
+        registered = register_codex_thread(new_id, title, cwd, out_path,
+                                           preview, start_ts)
+
+    print("OpenCode -> Codex 转换完成")
+    print("  来源: %s (%s)" % (session_id, db))
+    print("  输出: %s" % out_path)
+    print("  记录: %d 条, cwd=%s" % (len(out), cwd))
+    if install and out_path.startswith(CODEX_SESSIONS_DIR):
+        print("  已安装到 Codex 会话目录并写入索引%s"
+              % (", 已注册桌面端数据库" if registered else ""))
+    return out_path
+
+
+def codex_to_opencode(src, out_path=None):
+    """Codex rollout -> OpenCode 导出 JSON (需手动 `opencode import` 导入)"""
+    records = read_jsonl(src)
+    meta = next((r["payload"] for r in records
+                 if r.get("type") == "session_meta"), {})
+    cwd = meta.get("cwd", os.getcwd())
+    src_id = meta.get("session_id") or meta.get("id") or uuid.uuid4().hex
+
+    conv = []           # (role, text, ts)
+    last_human = None
+    for rec in records:
+        if rec.get("type") != "response_item":
+            continue
+        p = rec.get("payload", {})
+        if p.get("type") != "message":
+            continue
+        role = p.get("role")
+        text = content_to_text(p.get("content"))
+        if role not in ("user", "assistant") or not text.strip():
+            continue
+        if role == "user":
+            if text.lstrip().startswith(CONTEXT_PREFIXES):
+                continue
+            if text.strip() == last_human:
+                continue  # 恢复会话产生的重复输入
+            last_human = text.strip()
+        else:
+            last_human = None
+        conv.append((role, text, rec.get("timestamp") or now_iso()))
+    if not conv:
+        sys.exit("没有可转换的对话内容: %s" % src)
+
+    def to_ms(ts):
+        try:
+            return int(datetime.fromisoformat(
+                ts.replace("Z", "+00:00")).timestamp() * 1000)
+        except ValueError:
+            return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    new_id = "ses_" + uuid.uuid4().hex[:26]
+    first_user = next((t for r, t, _ in conv if r == "user"), "imported")
+    title = first_user.strip().splitlines()[0][:80]
+    created = to_ms(conv[0][2])
+    messages = []
+    parent_id = ""
+    for role, text, ts in conv:
+        ms = to_ms(ts)
+        msg_id = "msg_" + uuid.uuid4().hex[:26]
+        if role == "user":
+            info = {"id": msg_id, "sessionID": new_id, "role": "user",
+                    "time": {"created": ms}, "agent": "session-convert",
+                    "model": {"providerID": "session-convert",
+                              "modelID": "imported"}}
+            parent_id = msg_id
+        else:
+            info = {"id": msg_id, "sessionID": new_id, "role": "assistant",
+                    "time": {"created": ms, "completed": ms},
+                    "parentID": parent_id or msg_id,
+                    "modelID": "imported", "providerID": "session-convert",
+                    "mode": "build", "agent": "session-convert",
+                    "path": {"cwd": cwd, "root": cwd}, "cost": 0,
+                    "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                               "cache": {"read": 0, "write": 0}}}
+        messages.append({"info": info, "parts": [{
+            "id": "prt_" + uuid.uuid4().hex[:26], "sessionID": new_id,
+            "messageID": msg_id, "type": "text", "text": text,
+            "time": {"start": ms, "end": ms}}]})
+
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "imported"
+    export = {"info": {"id": new_id, "slug": slug, "projectID": "global",
+                       "directory": cwd, "title": title,
+                       "version": "session-convert",
+                       "time": {"created": created,
+                                "updated": to_ms(conv[-1][2])}},
+              "messages": messages}
+
+    if out_path is None:
+        out_path = "%s.opencode.json" % src_id[:8]
+    parent = os.path.dirname(out_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(export, f, ensure_ascii=False, indent=2)
+
+    print("Codex -> OpenCode 转换完成")
+    print("  来源: %s" % src)
+    print("  输出: %s (%d 条消息)" % (out_path, len(messages)))
+    print("  OpenCode 不扫描外部文件, 请在终端执行导入:")
+    print("    opencode import \"%s\"" % os.path.abspath(out_path))
+    return out_path
+
+
+# ---------------------------------------------------------------------------
 # 辅助: 列出会话
 # ---------------------------------------------------------------------------
 
@@ -673,6 +934,14 @@ def list_sessions(which):
             key=os.path.getmtime, reverse=True)
         for f in files[:20]:
             print("  %s  (%.0f KB)" % (f, os.path.getsize(f) / 1024))
+    if which in ("opencode", "all"):
+        db = find_opencode_db()
+        print("== OpenCode 会话 (%s) ==" % (db or "未找到数据库"))
+        if db:
+            for sid, title, _, ts_ms in list_opencode_sessions(db, limit=20):
+                when = datetime.fromtimestamp(ts_ms / 1000).strftime(
+                    "%Y-%m-%d %H:%M") if ts_ms else "--"
+                print("  %s  [%s] %s" % (sid, when, (title or "(无标题)")[:40]))
 
 
 # ---------------------------------------------------------------------------
@@ -725,46 +994,54 @@ def _pick(prompt, count):
         print("请输入 1-%d 之间的数字, 或 q 退出" % count)
 
 
+def _pick_codex_file():
+    """列最近的 Codex 会话让用户选 -> (路径, 标题) 或 None"""
+    files = sorted(
+        glob.glob(os.path.join(CODEX_SESSIONS_DIR, "**", "rollout-*.jsonl"),
+                  recursive=True),
+        key=os.path.getmtime, reverse=True)[:15]
+    if not files:
+        print("没有找到 Codex 会话 (%s)" % CODEX_SESSIONS_DIR)
+        return None
+    titles = _codex_titles()
+    print()
+    infos = []
+    for i, f in enumerate(files):
+        base = os.path.basename(f)
+        # rollout-<时间戳>-<uuid>.jsonl, uuid 是最后 36 位
+        sid = base[len("rollout-"):-len(".jsonl")][-36:]
+        title = titles.get(sid) or "(无标题)"
+        mtime = datetime.fromtimestamp(os.path.getmtime(f)).strftime("%m-%d %H:%M")
+        infos.append((f, title))
+        print("  %2d. [%s] %s" % (i + 1, mtime, title[:40]))
+    print()
+    n = _pick("选择要转换的会话 [1-%d]: " % len(infos), len(infos))
+    return None if n is None else infos[n]
+
+
 def interactive_main():
     print("=" * 46)
-    print("  Claude Code <-> Codex 会话转换工具")
+    print("  Claude / Codex / OpenCode 会话转换工具")
     print("=" * 46)
     print()
-    print("  1. Codex  -> Claude  (把 Codex 会话搬进 Claude)")
-    print("  2. Claude -> Codex   (把 Claude 会话搬进 Codex)")
+    print("  1. Codex    -> Claude    (把 Codex 会话搬进 Claude)")
+    print("  2. Claude   -> Codex     (把 Claude 会话搬进 Codex)")
+    print("  3. OpenCode -> Codex     (把 OpenCode 会话搬进 Codex)")
+    print("  4. Codex    -> OpenCode  (导出文件, 再用 opencode import 导入)")
     print()
-    choice = _pick("选择转换方向 [1/2]: ", 2)
+    choice = _pick("选择转换方向 [1-4]: ", 4)
     if choice is None:
         return
 
     if choice == 0:
-        files = sorted(
-            glob.glob(os.path.join(CODEX_SESSIONS_DIR, "**", "rollout-*.jsonl"),
-                      recursive=True),
-            key=os.path.getmtime, reverse=True)[:15]
-        if not files:
-            print("没有找到 Codex 会话 (%s)" % CODEX_SESSIONS_DIR)
+        picked = _pick_codex_file()
+        if picked is None:
             return
-        titles = _codex_titles()
-        print()
-        infos = []
-        for i, f in enumerate(files):
-            base = os.path.basename(f)
-            # rollout-<时间戳>-<uuid>.jsonl, uuid 是最后 36 位
-            sid = base[len("rollout-"):-len(".jsonl")][-36:]
-            title = titles.get(sid) or "(无标题)"
-            mtime = datetime.fromtimestamp(os.path.getmtime(f)).strftime("%m-%d %H:%M")
-            infos.append((f, title))
-            print("  %2d. [%s] %s" % (i + 1, mtime, title[:40]))
-        print()
-        n = _pick("选择要转换的会话 [1-%d]: " % len(infos), len(infos))
-        if n is None:
-            return
-        src, title = infos[n]
+        src, title = picked
         codex_to_claude(src, title=title if title != "(无标题)" else None)
         print()
-        print("在对应项目目录运行 claude -r 即可在历史列表中看到该会话。")
-    else:
+        print("在对应项目目录运行 claude -r, 或重启 Claude 桌面应用即可看到该会话。")
+    elif choice == 1:
         files = sorted(
             glob.glob(os.path.join(CLAUDE_PROJECTS_DIR, "*", "*.jsonl")),
             key=os.path.getmtime, reverse=True)[:15]
@@ -785,6 +1062,39 @@ def interactive_main():
         claude_to_codex(infos[n])
         print()
         print("打开 Codex 即可在历史列表中看到该会话。")
+    elif choice == 2:
+        db = find_opencode_db()
+        if not db:
+            print("找不到 OpenCode 数据库 (未安装或没用过 OpenCode)")
+            return
+        sessions = list_opencode_sessions(db)
+        if not sessions:
+            print("OpenCode 里没有会话")
+            return
+        print()
+        for i, (sid, title, _, ts_ms) in enumerate(sessions):
+            when = datetime.fromtimestamp(ts_ms / 1000).strftime("%m-%d %H:%M") \
+                if ts_ms else "--"
+            print("  %2d. [%s] %s" % (i + 1, when, (title or "(无标题)")[:40]))
+        print()
+        n = _pick("选择要转换的会话 [1-%d]: " % len(sessions), len(sessions))
+        if n is None:
+            return
+        opencode_to_codex(sessions[n][0], db=db)
+        print()
+        print("打开 Codex 即可在历史列表中看到该会话。")
+    else:
+        picked = _pick_codex_file()
+        if picked is None:
+            return
+        src, _ = picked
+        desktop = os.path.join(HOME, "Desktop")
+        out_dir = desktop if os.path.isdir(desktop) else HOME
+        out = codex_to_opencode(src, out_path=os.path.join(
+            out_dir, os.path.basename(src)[len("rollout-"):-len(".jsonl")][-36:][:8]
+            + ".opencode.json"))
+        print()
+        print("导出文件已放到: %s" % out)
 
 
 def _run_interactive():
@@ -830,8 +1140,21 @@ def main():
     p2.add_argument("--latest", action="store_true", help="使用最新的 Claude 会话")
     p2.add_argument("-o", "--output", help="只输出到该文件, 不安装到 Codex 目录")
 
-    p3 = sub.add_parser("list", help="列出可转换的会话文件")
-    p3.add_argument("which", nargs="?", choices=["codex", "claude", "all"],
+    p3 = sub.add_parser("opencode2codex", help="OpenCode 会话 -> Codex rollout")
+    p3.add_argument("input", nargs="?", help="OpenCode 会话 id (ses_...)")
+    p3.add_argument("--latest", action="store_true", help="使用最新的 OpenCode 会话")
+    p3.add_argument("-o", "--output", help="只输出到该文件, 不安装到 Codex 目录")
+    p3.add_argument("--db", help="OpenCode 数据库路径 (默认自动探测)")
+
+    p4 = sub.add_parser("codex2opencode",
+                        help="Codex rollout -> OpenCode 导出 JSON (之后 opencode import)")
+    p4.add_argument("input", nargs="?", help="Codex rollout-*.jsonl 文件路径")
+    p4.add_argument("--latest", action="store_true", help="使用最新的 Codex 会话")
+    p4.add_argument("-o", "--output", help="导出 JSON 输出路径")
+
+    p5 = sub.add_parser("list", help="列出可转换的会话")
+    p5.add_argument("which", nargs="?",
+                    choices=["codex", "claude", "opencode", "all"],
                     default="all")
 
     args = ap.parse_args()
@@ -840,11 +1163,18 @@ def main():
         list_sessions(args.which)
         return
 
+    if args.cmd == "opencode2codex":
+        # OpenCode 会话在数据库里, 不走文件路径逻辑
+        opencode_to_codex(None if args.latest else args.input,
+                          out_path=args.output,
+                          install=args.output is None, db=args.db)
+        return
+
     if args.latest:
-        if args.cmd == "codex2claude":
-            src = latest_file(CODEX_SESSIONS_DIR, os.path.join("**", "rollout-*.jsonl"))
-        else:
+        if args.cmd == "claude2codex":
             src = latest_file(CLAUDE_PROJECTS_DIR, os.path.join("*", "*.jsonl"))
+        else:
+            src = latest_file(CODEX_SESSIONS_DIR, os.path.join("**", "rollout-*.jsonl"))
         if not src:
             sys.exit("找不到会话文件")
         print("使用最新会话: %s" % src)
@@ -861,6 +1191,8 @@ def main():
                         include_context=args.include_context,
                         reasoning_mode=args.reasoning, title=args.title,
                         override_cwd=args.claude_cwd)
+    elif args.cmd == "codex2opencode":
+        codex_to_opencode(src, out_path=args.output)
     else:
         claude_to_codex(src, out_path=args.output, install=install)
 

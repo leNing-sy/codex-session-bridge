@@ -1,6 +1,6 @@
 # session-convert
 
-Claude Code 与 Codex 会话记录互相转换的脚本。把一边的历史会话转换并"安装"到另一边的会话目录，使其出现在对方的历史列表里，可以直接恢复并继续对话。
+Claude Code / Codex / OpenCode 会话记录互相转换的脚本（四方向）。把一边的历史会话转换并"安装"到另一边的会话目录，使其出现在对方的历史列表里，可以直接恢复并继续对话。
 
 单文件、无第三方依赖，Python 3.8+。
 
@@ -9,7 +9,7 @@ Claude Code 与 Codex 会话记录互相转换的脚本。把一边的历史会�
 ### 直接下载 exe（最简单）
 
 去仓库的 [Releases 页面](../../../releases/latest)下载 `session-convert.exe`
-（Windows 64 位，约 9 MB，免安装免 Python），双击即用。
+（Windows 64 位，约 9 MB，免安装免 Python），双击即用，支持全部四个转换方向。
 
 - exe 由 GitHub Actions 在打 tag 时从源码自动构建（先跑完整测试套件，
   构建日志公开可查），不是手工上传的二进制。
@@ -18,8 +18,10 @@ Claude Code 与 Codex 会话记录互相转换的脚本。把一边的历史会�
 
 ### 交互模式（推荐，双击即用）
 
-不带参数运行（或双击 exe）会进入交互模式：选方向 → 从最近 15 个
-会话列表里选一个（带标题和时间）→ 自动转换并安装，全程不用记参数。
+不带参数运行（或双击 exe）会进入交互模式：从 4 个方向里选一个 →
+从最近会话列表里选一个（带标题和时间）→ 自动转换并安装，全程不用记参数。
+
+1. Codex → Claude　2. Claude → Codex　3. OpenCode → Codex　4. Codex → OpenCode
 
 ### 从源码自行打包 exe
 
@@ -51,8 +53,14 @@ python session_convert.py codex2claude --latest              # 最新的 Codex �
 python session_convert.py claude2codex <session.jsonl>
 python session_convert.py claude2codex --latest              # 最新的 Claude 会话
 
-# 列出两边可转换的会话文件
-python session_convert.py list [codex|claude|all]
+# OpenCode -> Codex (直读 OpenCode 数据库, 只读)
+python session_convert.py opencode2codex <ses_会话id>
+
+# Codex -> OpenCode (生成导出文件, 之后 opencode import 导入)
+python session_convert.py codex2opencode <rollout-*.jsonl>
+
+# 列出可转换的会话 (全部命令均支持 --latest)
+python session_convert.py list [codex|claude|opencode|all]
 ```
 
 默认直接安装到目标工具的会话目录；加 `-o <文件>` 则只输出到指定文件、不安装。
@@ -83,6 +91,11 @@ python session_convert.py list [codex|claude|all]
   （`%APPDATA%\Claude\claude-code-sessions\<org>\<user>\local_*.json`，
   参照已有条目做模板；没装桌面版时自动跳过）。**重启桌面应用**后
   出现在历史列表。桌面应用的列表不扫描 CLI 会话目录，注册条目是必须的。
+
+- **OpenCode**：OpenCode 的会话在它自己的 SQLite 数据库里
+  （`~/.local/share/opencode/opencode.db`，转换时只读打开，绝不写入）。
+  `codex2opencode` 生成的是导出 JSON 文件——OpenCode 不扫描外部文件，
+  需要手动执行 `opencode import <文件>` 完成导入（转换完成时会打印这条命令）。
 
 ## 格式说明（基于实际文件逆向）
 
