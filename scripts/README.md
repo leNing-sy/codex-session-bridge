@@ -30,16 +30,19 @@ python session_convert.py list [codex|claude|all]
 | `--reasoning thinking\|text\|skip` | Codex 推理摘要的转换方式，默认转成 thinking 块 |
 | `--include-context` | 保留 AGENTS.md、环境上下文等注入消息（默认跳过，只留真实对话） |
 
-默认会做两项清理：
+两个方向默认都会清理注入消息：
 
-- 跳过 Codex 注入的隐藏上下文消息（`<environment_context>`、`<in-app-browser-context>`、
-  AGENTS.md 等），这些在 Codex 界面里不显示，转过去会被当成正文渲染；
-- 对连续重复的用户消息去重 —— Codex 每次恢复会话时会把未回答的输入重复写入记录。
+- codex2claude：跳过 Codex 注入的隐藏上下文消息（`<environment_context>`、
+  `<in-app-browser-context>`、AGENTS.md 等），这些在 Codex 界面里不显示，
+  转过去会被当成正文渲染；并对恢复会话导致的重复用户输入去重（比较时忽略首尾空白）。
+- claude2codex：跳过 Claude 记录的斜杠命令（`<command-name>` 等）、本地命令输出
+  （`<local-command-stdout>`）、`<system-reminder>` 和"[Request interrupted]"等标记。
 
 ## 转换后如何打开
 
 - **Claude Code CLI**：在会话对应的 cwd 目录下运行 `claude --resume <会话id>`，或 `claude -r` 从历史列表选择。
-- **Codex**：转换时已写入 `~/.codex/session_index.jsonl` 索引，直接出现在历史会话列表。
+- **Codex**：转换时会写入 `~/.codex/session_index.jsonl` 索引，并尽力注册到桌面端
+  实际读取的 `state_5.sqlite` threads 表（缺库/缺表时自动跳过），出现在历史会话列表。
 - **Claude 桌面应用**：桌面应用的历史列表不扫描 CLI 会话目录，而是读自己的注册表
   `%APPDATA%\Claude\claude-code-sessions\<org>\<user>\local_*.json`。
   想在桌面应用里看到转换的会话，需要参照已有条目手动补一个注册 JSON
