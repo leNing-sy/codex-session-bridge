@@ -6,20 +6,37 @@ Claude Code 与 Codex 会话记录互相转换的脚本。把一边的历史会�
 
 ## 用法
 
+### 直接下载 exe（最简单）
+
+去仓库的 [Releases 页面](../../../releases/latest)下载 `session-convert.exe`
+（Windows 64 位，约 9 MB，免安装免 Python），双击即用。
+
+- exe 由 GitHub Actions 在打 tag 时从源码自动构建（先跑完整测试套件，
+  构建日志公开可查），不是手工上传的二进制。
+- 未做代码签名：首次运行遇到 Windows SmartScreen 提示时，
+  点"更多信息 → 仍要运行"即可。
+
 ### 交互模式（推荐，双击即用）
 
-不带参数运行（或双击打包好的 exe）会进入交互模式：选方向 → 从最近 15 个
+不带参数运行（或双击 exe）会进入交互模式：选方向 → 从最近 15 个
 会话列表里选一个（带标题和时间）→ 自动转换并安装，全程不用记参数。
 
-### 打包成 exe
+### 从源码自行打包 exe
 
 ```powershell
 pip install pyinstaller
 pyinstaller --onefile --console --name session-convert scripts/session_convert.py
 ```
 
-生成 `dist\session-convert.exe`（约 8 MB，单文件免安装），双击即进交互模式，
-也支持下面所有命令行参数。
+生成 `dist\session-convert.exe`，与 Release 下载的等价。
+
+### 发布新版本（维护者）
+
+```bash
+git tag v0.x.0 && git push origin v0.x.0
+```
+
+GitHub Actions 自动完成：全量测试 → 构建 exe → 冒烟测试 → 创建 Release 并挂附件。
 
 ### 命令行
 

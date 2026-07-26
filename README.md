@@ -4,6 +4,12 @@
 
 当前优先支持 **OpenCode -> Codex**。项目基于 UniSessions 的来源解析能力开发，但重写了 Codex 生成、安装、注册、验证和回滚流程。
 
+> **直接下载**：不想装 Python？去 [Releases 页面](../../releases/latest)下载
+> `session-convert.exe`（Windows 64 位，免安装），双击即进交互模式，支持
+> Codex <-> Claude 双向转换。exe 由 GitHub Actions 从源码自动构建（构建日志
+> 公开可查）；未做代码签名，首次运行遇到 SmartScreen 提示时点
+> "更多信息 → 仍要运行"即可。
+
 ## 当前状态
 
 已完成：
