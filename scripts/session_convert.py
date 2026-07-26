@@ -82,7 +82,9 @@ def read_jsonl(path):
 
 
 def write_jsonl(path, records):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    parent = os.path.dirname(path)
+    if parent:  # -o 传相对文件名时 dirname 为空, makedirs('') 会报错
+        os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         for rec in records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")

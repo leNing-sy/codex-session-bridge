@@ -376,6 +376,28 @@ class ConvertScriptTests(unittest.TestCase):
                 connection.close()
             self.assertEqual(rows, [("sess-1", "New title", 1)])
 
+    def test_relative_output_path_works(self) -> None:
+        # write_jsonl used to call makedirs('') for a bare -o filename.
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "rollout.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-07-01T10:00:00.000Z",
+                    "type": "session_meta",
+                    "payload": {"id": "s1", "timestamp": "2026-07-01T10:00:00.000Z", "cwd": r"C:\projects\demo"},
+                },
+                _codex_user("question"),
+            ]
+            src.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+            cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                self.script.codex_to_claude(str(src), out_path="relative-out.jsonl", install=False)
+                self.assertTrue((Path(tmp) / "relative-out.jsonl").is_file())
+            finally:
+                os.chdir(cwd)
+
     def test_register_codex_thread_missing_database_is_noop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             original_home = self.script.HOME
