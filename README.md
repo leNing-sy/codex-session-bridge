@@ -135,6 +135,8 @@ pyinstaller --onefile --console --name session-convert scripts/session_convert.p
 ```powershell
 python scripts/session_convert.py codex2claude --latest
 python scripts/session_convert.py claude2codex --latest
+python scripts/session_convert.py opencode2codex --latest
+python scripts/session_convert.py codex2opencode --latest
 ```
 
 详细用法、两种格式的逆向说明和已知限制见 [scripts/README.md](scripts/README.md)。

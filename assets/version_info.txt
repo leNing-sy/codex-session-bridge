@@ -15,7 +15,7 @@ VSVersionInfo(
     StringFileInfo([
       StringTable('040904B0', [
         StringStruct('CompanyName', 'codex-session-bridge'),
-        StringStruct('FileDescription', 'Claude Code <-> Codex session converter'),
+        StringStruct('FileDescription', 'Claude Code / Codex / OpenCode session converter'),
         StringStruct('FileVersion', '0.4.0.0'),
         StringStruct('InternalName', 'session-convert'),
         StringStruct('LegalCopyright', 'MIT License'),
