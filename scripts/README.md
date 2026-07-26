@@ -37,6 +37,8 @@ git tag v0.x.0 && git push origin v0.x.0
 ```
 
 GitHub Actions 自动完成：全量测试 → 构建 exe → 冒烟测试 → 创建 Release 并挂附件。
+发版前记得同步 `assets/version_info.txt` 里的两处版本号（exe 属性里显示的版本）。
+图标由 `assets/make_icon.py` 生成（纯标准库），改图案后重跑一次提交新的 `icon.ico` 即可。
 
 ### 命令行
 
@@ -77,10 +79,10 @@ python session_convert.py list [codex|claude|all]
 - **Claude Code CLI**：在会话对应的 cwd 目录下运行 `claude --resume <会话id>`，或 `claude -r` 从历史列表选择。
 - **Codex**：转换时会写入 `~/.codex/session_index.jsonl` 索引，并尽力注册到桌面端
   实际读取的 `state_5.sqlite` threads 表（缺库/缺表时自动跳过），出现在历史会话列表。
-- **Claude 桌面应用**：桌面应用的历史列表不扫描 CLI 会话目录，而是读自己的注册表
-  `%APPDATA%\Claude\claude-code-sessions\<org>\<user>\local_*.json`。
-  想在桌面应用里看到转换的会话，需要参照已有条目手动补一个注册 JSON
-  （`cliSessionId` 填转换出的会话 id，`cwd` 填项目路径），然后重启应用。
+- **Claude 桌面应用**：转换时会自动注册到桌面应用的会话目录
+  （`%APPDATA%\Claude\claude-code-sessions\<org>\<user>\local_*.json`，
+  参照已有条目做模板；没装桌面版时自动跳过）。**重启桌面应用**后
+  出现在历史列表。桌面应用的列表不扫描 CLI 会话目录，注册条目是必须的。
 
 ## 格式说明（基于实际文件逆向）
 
@@ -100,4 +102,5 @@ python session_convert.py list [codex|claude|all]
 
 - Codex 的推理摘要转成 Claude thinking 块时没有签名，继续对话时模型可能忽略这部分（不影响正文和工具记录的理解）。
 - Claude 的 sidechain（子代理）记录不转换。
-- 图片、音频等多媒体内容不转换，只保留文本。
+- 图片消息双向转换（base64 直通；转进 Codex 时同时落盘到
+  `~/.codex/bridge-images/<会话id>/` 供界面显示）；音频等其他多媒体不转换。

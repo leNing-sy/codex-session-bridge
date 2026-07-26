@@ -116,8 +116,9 @@ python -m venv .venv
 - 双向清理注入消息：Codex 侧过滤 AGENTS.md、`<environment_context>`、
   `<in-app-browser-context>` 等隐藏上下文并对恢复会话产生的重复输入去重，
   Claude 侧过滤斜杠命令、本地命令输出、`<system-reminder>` 等记录；
-- claude2codex 会注册 Codex 桌面端读取的 `state_5.sqlite` threads 表，
-  转完直接出现在历史列表；
+- 图片消息双向转换（base64 直通，转进 Codex 时同时落盘供界面显示）；
+- 两端桌面应用自动注册：claude2codex 写 Codex 的 `state_5.sqlite` threads 表，
+  codex2claude 写 Claude 桌面端的会话注册目录（重启应用后可见）；
 - 转换结果已在 Claude Code 真实续聊场景验证。
 
 **交互模式**：不带参数运行进入菜单——选方向、从最近会话列表（带标题和时间）

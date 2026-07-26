@@ -376,6 +376,72 @@ class ConvertScriptTests(unittest.TestCase):
                 connection.close()
             self.assertEqual(rows, [("sess-1", "New title", 1)])
 
+    # 1x1 红色 PNG (无第三方依赖)
+    _PNG_B64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4"
+        "z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+    )
+
+    def test_codex2claude_converts_input_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "rollout.jsonl"
+            out = Path(tmp) / "out.jsonl"
+            records = [
+                {
+                    "timestamp": "2026-07-01T10:00:00.000Z",
+                    "type": "session_meta",
+                    "payload": {"id": "s1", "timestamp": "2026-07-01T10:00:00.000Z", "cwd": r"C:\projects\demo"},
+                },
+                {
+                    "timestamp": "2026-07-01T10:00:01.000Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message", "role": "user",
+                        "content": [
+                            {"type": "input_image", "image_url": "data:image/png;base64," + self._PNG_B64},
+                            {"type": "input_text", "text": "看这张图"},
+                        ],
+                    },
+                },
+            ]
+            src.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+            self.script.codex_to_claude(str(src), out_path=str(out), install=False)
+            converted = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+            users = [r for r in converted if r["type"] == "user"]
+            self.assertEqual(len(users), 1)
+            blocks = users[0]["message"]["content"]
+            self.assertEqual(blocks[0]["type"], "image")
+            self.assertEqual(blocks[0]["source"]["media_type"], "image/png")
+            self.assertEqual(blocks[0]["source"]["data"], self._PNG_B64)
+            self.assertEqual(blocks[1], {"type": "text", "text": "看这张图"})
+
+    def test_claude2codex_converts_image_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "claude.jsonl"
+            out = Path(tmp) / "out.jsonl"
+            records = [
+                _claude_record("user", [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": self._PNG_B64}},
+                    {"type": "text", "text": "这是截图"},
+                ]),
+                _claude_record("assistant", [{"type": "text", "text": "看到了"}]),
+            ]
+            src.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+            self.script.claude_to_codex(str(src), out_path=str(out), install=False)
+            converted = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+            items = [r["payload"] for r in converted if r["type"] == "response_item"]
+            user_msgs = [p for p in items if p["type"] == "message" and p["role"] == "user"]
+            self.assertEqual(len(user_msgs), 1)
+            content = user_msgs[0]["content"]
+            self.assertEqual(content[0]["type"], "input_image")
+            self.assertEqual(content[0]["image_url"], "data:image/png;base64," + self._PNG_B64)
+            self.assertEqual(content[1], {"type": "input_text", "text": "这是截图"})
+            events = [r["payload"] for r in converted if r["type"] == "event_msg"
+                      and r["payload"].get("type") == "user_message"]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["message"], "这是截图")
+            self.assertEqual(events[0]["local_images"], [])  # install=False 不落盘
+
     def test_relative_output_path_works(self) -> None:
         # write_jsonl used to call makedirs('') for a bare -o filename.
         import os
@@ -397,6 +463,84 @@ class ConvertScriptTests(unittest.TestCase):
                 self.assertTrue((Path(tmp) / "relative-out.jsonl").is_file())
             finally:
                 os.chdir(cwd)
+
+    def _make_desktop_registry(self, root: Path) -> Path:
+        target = root / "org-1" / "user-1"
+        target.mkdir(parents=True)
+        template = {
+            "sessionId": "local_00000000-0000-4000-8000-000000000000",
+            "cliSessionId": "some-other-session",
+            "cwd": r"C:\old\path", "originCwd": r"C:\old\path",
+            "title": "old title", "titleSource": "auto",
+            "createdAt": 1, "lastActivityAt": 1, "lastFocusedAt": 1,
+            "model": "claude-fable-5", "isArchived": False,
+            "permissionMode": "auto", "completedTurns": 2,
+            "sessionPermissionUpdates": [{"type": "addRules"}],
+        }
+        (target / (template["sessionId"] + ".json")).write_text(
+            json.dumps(template), encoding="utf-8")
+        return target
+
+    def test_register_claude_desktop_creates_entry_from_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = self._make_desktop_registry(root)
+            original = self.script.CLAUDE_DESKTOP_DIR
+            self.script.CLAUDE_DESKTOP_DIR = str(root)
+            try:
+                ok = self.script.register_claude_desktop(
+                    "cli-sess-1", "我的标题", r"C:\projects\demo", 5)
+            finally:
+                self.script.CLAUDE_DESKTOP_DIR = original
+            self.assertTrue(ok)
+            files = sorted(target.glob("local_*.json"))
+            self.assertEqual(len(files), 2)
+            entries = [json.loads(f.read_text(encoding="utf-8")) for f in files]
+            new = next(e for e in entries if e["cliSessionId"] == "cli-sess-1")
+            self.assertEqual(new["title"], "我的标题")
+            self.assertEqual(new["cwd"], r"C:\projects\demo")
+            self.assertEqual(new["completedTurns"], 5)
+            self.assertEqual(new["sessionPermissionUpdates"], [])
+            self.assertNotEqual(new["sessionId"], "local_00000000-0000-4000-8000-000000000000")
+
+    def test_register_claude_desktop_updates_existing_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = self._make_desktop_registry(root)
+            original = self.script.CLAUDE_DESKTOP_DIR
+            self.script.CLAUDE_DESKTOP_DIR = str(root)
+            try:
+                self.script.register_claude_desktop("cli-sess-1", "标题一", r"C:\p", 3)
+                self.script.register_claude_desktop("cli-sess-1", "标题二", r"C:\p", 4)
+            finally:
+                self.script.CLAUDE_DESKTOP_DIR = original
+            files = sorted(target.glob("local_*.json"))
+            self.assertEqual(len(files), 2)  # 模板 + 注册条目, 没有重复
+            entries = [json.loads(f.read_text(encoding="utf-8")) for f in files]
+            mine = [e for e in entries if e["cliSessionId"] == "cli-sess-1"]
+            self.assertEqual(len(mine), 1)
+            self.assertEqual(mine[0]["title"], "标题二")
+            self.assertEqual(mine[0]["completedTurns"], 4)
+
+    def test_register_claude_desktop_missing_dir_is_noop(self) -> None:
+        original = self.script.CLAUDE_DESKTOP_DIR
+        self.script.CLAUDE_DESKTOP_DIR = r"C:\nonexistent-desktop-dir-xyz"
+        try:
+            ok = self.script.register_claude_desktop("cli-1", "t", "c", 1)
+        finally:
+            self.script.CLAUDE_DESKTOP_DIR = original
+        self.assertFalse(ok)
+
+    def test_register_claude_desktop_no_template_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "org-1" / "user-1").mkdir(parents=True)  # 空目录, 无模板
+            original = self.script.CLAUDE_DESKTOP_DIR
+            self.script.CLAUDE_DESKTOP_DIR = tmp
+            try:
+                ok = self.script.register_claude_desktop("cli-1", "t", "c", 1)
+            finally:
+                self.script.CLAUDE_DESKTOP_DIR = original
+            self.assertFalse(ok)
 
     def test_register_codex_thread_missing_database_is_noop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

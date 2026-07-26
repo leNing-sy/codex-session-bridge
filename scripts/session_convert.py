@@ -28,6 +28,7 @@ Claude Code <-> Codex 会话转换脚本
 """
 
 import argparse
+import base64
 import glob
 import json
 import os
@@ -47,6 +48,9 @@ HOME = os.path.expanduser("~")
 CODEX_SESSIONS_DIR = os.path.join(HOME, ".codex", "sessions")
 CODEX_INDEX_FILE = os.path.join(HOME, ".codex", "session_index.jsonl")
 CLAUDE_PROJECTS_DIR = os.path.join(HOME, ".claude", "projects")
+# Claude 桌面应用的会话注册目录 (历史列表只读这里, 不扫描 CLI 会话目录)
+CLAUDE_DESKTOP_DIR = os.path.join(
+    os.environ.get("APPDATA", ""), "Claude", "claude-code-sessions")
 CLAUDE_VERSION = "2.1.219"  # 写入 claude 记录的 version 字段
 
 # Codex 会把 AGENTS.md / 环境上下文等包装成 user 消息塞进对话,
@@ -112,6 +116,20 @@ def content_to_text(content):
         else:
             parts.append(str(block))
     return "".join(parts)
+
+
+def content_images(content):
+    """提取 codex content 里的 input_image (data URL) -> [(media_type, base64串)]"""
+    images = []
+    if not isinstance(content, list):
+        return images
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "input_image":
+            url = block.get("image_url", "")
+            if isinstance(url, str) and url.startswith("data:") and ";base64," in url:
+                media, data = url[5:].split(";base64,", 1)
+                images.append((media or "image/png", data))
+    return images
 
 
 def latest_file(pattern_dir, glob_pat):
@@ -209,19 +227,28 @@ def codex_to_claude(src, out_path=None, install=True, include_context=False,
         if pt == "message":
             role = p.get("role")
             text = content_to_text(p.get("content"))
-            if not text.strip():
+            images = content_images(p.get("content")) if role == "user" else []
+            if not text.strip() and not images:
                 continue
             if role == "user":
                 stripped = text.lstrip()
                 if not include_context and stripped.startswith(CONTEXT_PREFIXES):
                     continue
-                if text.strip() == last_human_text:
+                if not images and text.strip() == last_human_text:
                     continue  # 恢复会话时重复记录的同一条输入(可能差个换行)
                 last_human_text = text.strip()
                 prompt_id = str(uuid.uuid4())
-                if first_user_text is None:
+                if first_user_text is None and text.strip():
                     first_user_text = text
-                emit_user(ts, text, is_human=True)
+                if images:
+                    blocks = [{"type": "image",
+                               "source": {"type": "base64", "media_type": m,
+                                          "data": d}} for m, d in images]
+                    if text.strip():
+                        blocks.append({"type": "text", "text": text})
+                    emit_user(ts, blocks, is_human=True)
+                else:
+                    emit_user(ts, text, is_human=True)
             elif role == "assistant":
                 last_human_text = None
                 emit_assistant(ts, {"type": "text", "text": text})
@@ -285,7 +312,66 @@ def codex_to_claude(src, out_path=None, install=True, include_context=False,
     print("  记录: %d 条 (人类消息 %d 条), cwd=%s" % (len(out), n_user, cwd))
     if install and out_path.startswith(CLAUDE_PROJECTS_DIR):
         print("  已安装到 Claude 项目目录, 在 %s 下运行 claude 后可在历史会话中恢复" % cwd)
+        reg_title = title or (first_user_text or "imported from codex"
+                              ).strip().splitlines()[0][:60]
+        if register_claude_desktop(session_id, reg_title, cwd, n_user):
+            print("  已注册 Claude 桌面端, 重启桌面应用后在历史列表可见")
     return out_path
+
+
+def register_claude_desktop(session_id, title, cwd, human_turns):
+    """注册进 Claude 桌面应用的会话列表 (尽力而为, 重启应用后生效).
+
+    桌面应用的历史列表只读 %APPDATA%/Claude/claude-code-sessions/<org>/<user>/
+    下的 local_*.json 条目。参照已有条目做模板; 找不到模板时跳过
+    (未安装桌面版, 或字段集无从得知)。同一 CLI 会话重复注册时更新原条目。
+    """
+    root = CLAUDE_DESKTOP_DIR
+    if not root or not os.path.isdir(root):
+        return False
+    try:
+        candidates = glob.glob(os.path.join(root, "*", "*", "local_*.json"))
+        if not candidates:
+            return False
+        by_dir = {}
+        for p in candidates:
+            by_dir.setdefault(os.path.dirname(p), []).append(p)
+        target_dir, entries = max(by_dir.items(), key=lambda kv: len(kv[1]))
+        out_file = None
+        entry = None
+        for p in entries:  # 已注册过同一 CLI 会话 -> 更新原条目
+            try:
+                with open(p, encoding="utf-8") as f:
+                    existing = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if existing.get("cliSessionId") == session_id:
+                entry, out_file = existing, p
+                break
+        if entry is None:
+            template_path = max(entries, key=os.path.getmtime)
+            with open(template_path, encoding="utf-8") as f:
+                entry = json.load(f)
+            entry["sessionId"] = "local_" + str(uuid.uuid4())
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        entry.update({
+            "cliSessionId": session_id,
+            "cwd": cwd, "originCwd": cwd,
+            "title": title, "titleSource": "user",
+            "createdAt": now_ms, "lastActivityAt": now_ms,
+            "lastFocusedAt": now_ms,
+            "isArchived": False,
+            "completedTurns": human_turns,
+            "sessionPermissionUpdates": [],  # 不继承模板会话的权限授权
+        })
+        if out_file is None:
+            out_file = os.path.join(target_dir, entry["sessionId"] + ".json")
+        with open(out_file, "w", encoding="utf-8") as f:
+            json.dump(entry, f, ensure_ascii=False)
+        return True
+    except (OSError, json.JSONDecodeError) as exc:
+        print("  警告: 未能注册 Claude 桌面端 (%s)" % exc)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -391,9 +477,25 @@ def claude_to_codex(src, out_path=None, install=True):
 
     out = []
     first_user_text = None
+    img_count = 0
+    n_images = 0
 
     def wrap(ts, rtype, payload):
         out.append({"timestamp": ts, "type": rtype, "payload": payload})
+
+    def save_image(source):
+        """把 base64 图片落盘, 供 Codex 界面显示 (模型上下文另走 data URL)"""
+        nonlocal img_count
+        img_count += 1
+        media = source.get("media_type", "image/png")
+        ext = {"image/png": ".png", "image/jpeg": ".jpg",
+               "image/gif": ".gif", "image/webp": ".webp"}.get(media, ".png")
+        img_dir = os.path.join(HOME, ".codex", "bridge-images", session_id)
+        os.makedirs(img_dir, exist_ok=True)
+        path = os.path.join(img_dir, "img-%03d%s" % (img_count, ext))
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(source.get("data", "")))
+        return path
 
     # 会话头
     wrap(start_ts, "session_meta", {
@@ -426,10 +528,12 @@ def claude_to_codex(src, out_path=None, install=True):
                     "content": [{"type": "input_text", "text": content}],
                 })
             elif isinstance(content, list):
+                texts, images = [], []
                 for block in content:
                     if not isinstance(block, dict):
                         continue
-                    if block.get("type") == "tool_result":
+                    bt = block.get("type")
+                    if bt == "tool_result":
                         result = block.get("content", "")
                         if isinstance(result, list):
                             result = "".join(
@@ -441,14 +545,35 @@ def claude_to_codex(src, out_path=None, install=True):
                             "call_id": block.get("tool_use_id", ""),
                             "output": [{"type": "input_text", "text": str(result)}],
                         })
-                    elif block.get("type") == "text" and block.get("text", "").strip():
-                        wrap(ts, "response_item", {
-                            "type": "message",
-                            "id": "msg_" + uuid.uuid4().hex[:24],
-                            "role": "user",
-                            "content": [{"type": "input_text",
-                                         "text": block["text"]}],
-                        })
+                    elif bt == "text" and block.get("text", "").strip():
+                        texts.append(block["text"])
+                    elif bt == "image" and isinstance(block.get("source"), dict) \
+                            and block["source"].get("type") == "base64":
+                        images.append(block["source"])
+                if texts or images:
+                    # 用户"图片+文字"消息: event 让 Codex 界面显示,
+                    # response_item 用 data URL 让模型上下文携带图片本体
+                    n_images += len(images)
+                    joined = "\n\n".join(texts)
+                    local_paths = [save_image(s) for s in images] if install else []
+                    wrap(ts, "event_msg", {
+                        "type": "user_message", "message": joined,
+                        "images": [], "local_images": local_paths,
+                        "audio": [], "local_audio": [], "text_elements": [],
+                    })
+                    item_content = [
+                        {"type": "input_image",
+                         "image_url": "data:%s;base64,%s" % (
+                             s.get("media_type", "image/png"), s.get("data", ""))}
+                        for s in images]
+                    if joined:
+                        item_content.append({"type": "input_text", "text": joined})
+                    wrap(ts, "response_item", {
+                        "type": "message",
+                        "id": "msg_" + uuid.uuid4().hex[:24],
+                        "role": "user",
+                        "content": item_content,
+                    })
 
         else:  # assistant
             for block in (content or []):
@@ -520,7 +645,8 @@ def claude_to_codex(src, out_path=None, install=True):
     print("Claude -> Codex 转换完成")
     print("  来源: %s" % src)
     print("  输出: %s" % out_path)
-    print("  记录: %d 条, cwd=%s" % (len(out), cwd))
+    print("  记录: %d 条%s, cwd=%s" % (
+        len(out), ", 图片 %d 张" % n_images if n_images else "", cwd))
     if install and out_path.startswith(CODEX_SESSIONS_DIR):
         print("  已安装到 Codex 会话目录并写入索引%s"
               % (", 已注册桌面端数据库" if registered else ""))
