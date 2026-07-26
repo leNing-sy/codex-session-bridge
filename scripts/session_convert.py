@@ -540,7 +540,146 @@ def list_sessions(which):
             print("  %s  (%.0f KB)" % (f, os.path.getsize(f) / 1024))
 
 
+# ---------------------------------------------------------------------------
+# 交互模式 (双击 exe / 无参数运行)
+# ---------------------------------------------------------------------------
+
+def _codex_titles():
+    """session_index.jsonl 里的 id -> 标题映射"""
+    titles = {}
+    if os.path.exists(CODEX_INDEX_FILE):
+        for entry in read_jsonl(CODEX_INDEX_FILE):
+            if isinstance(entry, dict) and entry.get("id"):
+                titles[entry["id"]] = entry.get("thread_name") or ""
+    return titles
+
+
+def _claude_preview(path, limit=200):
+    """取 Claude 会话里第一条人类消息作预览"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i >= limit:
+                    break
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("type") != "user":
+                    continue
+                content = rec.get("message", {}).get("content")
+                if isinstance(content, str) and content.strip() \
+                        and not content.lstrip().startswith(CLAUDE_NOISE_PREFIXES):
+                    return content.strip().splitlines()[0]
+    except OSError:
+        pass
+    return ""
+
+
+def _pick(prompt, count):
+    while True:
+        raw = input(prompt).strip()
+        if raw.lower() in ("q", "quit", "exit"):
+            return None
+        try:
+            n = int(raw)
+            if 1 <= n <= count:
+                return n - 1
+        except ValueError:
+            pass
+        print("请输入 1-%d 之间的数字, 或 q 退出" % count)
+
+
+def interactive_main():
+    print("=" * 46)
+    print("  Claude Code <-> Codex 会话转换工具")
+    print("=" * 46)
+    print()
+    print("  1. Codex  -> Claude  (把 Codex 会话搬进 Claude)")
+    print("  2. Claude -> Codex   (把 Claude 会话搬进 Codex)")
+    print()
+    choice = _pick("选择转换方向 [1/2]: ", 2)
+    if choice is None:
+        return
+
+    if choice == 0:
+        files = sorted(
+            glob.glob(os.path.join(CODEX_SESSIONS_DIR, "**", "rollout-*.jsonl"),
+                      recursive=True),
+            key=os.path.getmtime, reverse=True)[:15]
+        if not files:
+            print("没有找到 Codex 会话 (%s)" % CODEX_SESSIONS_DIR)
+            return
+        titles = _codex_titles()
+        print()
+        infos = []
+        for i, f in enumerate(files):
+            base = os.path.basename(f)
+            # rollout-<时间戳>-<uuid>.jsonl, uuid 是最后 36 位
+            sid = base[len("rollout-"):-len(".jsonl")][-36:]
+            title = titles.get(sid) or "(无标题)"
+            mtime = datetime.fromtimestamp(os.path.getmtime(f)).strftime("%m-%d %H:%M")
+            infos.append((f, title))
+            print("  %2d. [%s] %s" % (i + 1, mtime, title[:40]))
+        print()
+        n = _pick("选择要转换的会话 [1-%d]: " % len(infos), len(infos))
+        if n is None:
+            return
+        src, title = infos[n]
+        codex_to_claude(src, title=title if title != "(无标题)" else None)
+        print()
+        print("在对应项目目录运行 claude -r 即可在历史列表中看到该会话。")
+    else:
+        files = sorted(
+            glob.glob(os.path.join(CLAUDE_PROJECTS_DIR, "*", "*.jsonl")),
+            key=os.path.getmtime, reverse=True)[:15]
+        if not files:
+            print("没有找到 Claude 会话 (%s)" % CLAUDE_PROJECTS_DIR)
+            return
+        print()
+        infos = []
+        for i, f in enumerate(files):
+            preview = _claude_preview(f) or "(无用户消息)"
+            mtime = datetime.fromtimestamp(os.path.getmtime(f)).strftime("%m-%d %H:%M")
+            infos.append(f)
+            print("  %2d. [%s] %s" % (i + 1, mtime, preview[:40]))
+        print()
+        n = _pick("选择要转换的会话 [1-%d]: " % len(infos), len(infos))
+        if n is None:
+            return
+        claude_to_codex(infos[n])
+        print()
+        print("打开 Codex 即可在历史列表中看到该会话。")
+
+
+def _run_interactive():
+    try:
+        interactive_main()
+    except (KeyboardInterrupt, EOFError):
+        print()
+    except SystemExit as exc:  # codex_to_claude/claude_to_codex 的 sys.exit
+        if exc.code:
+            print(exc.code)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    finally:
+        try:
+            input("\n按回车键退出...")
+        except (KeyboardInterrupt, EOFError):
+            pass
+
+
 def main():
+    # 控制台编码兜底: 遇到当前代码页画不出的字符时不崩溃
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, OSError):
+            pass
+    if len(sys.argv) == 1:
+        _run_interactive()
+        return
     ap = argparse.ArgumentParser(
         description="Claude Code 与 Codex 会话互相转换",
         formatter_class=argparse.RawDescriptionHelpFormatter)

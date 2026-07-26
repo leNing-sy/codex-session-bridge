@@ -6,6 +6,23 @@ Claude Code 与 Codex 会话记录互相转换的脚本。把一边的历史会�
 
 ## 用法
 
+### 交互模式（推荐，双击即用）
+
+不带参数运行（或双击打包好的 exe）会进入交互模式：选方向 → 从最近 15 个
+会话列表里选一个（带标题和时间）→ 自动转换并安装，全程不用记参数。
+
+### 打包成 exe
+
+```powershell
+pip install pyinstaller
+pyinstaller --onefile --console --name session-convert scripts/session_convert.py
+```
+
+生成 `dist\session-convert.exe`（约 8 MB，单文件免安装），双击即进交互模式，
+也支持下面所有命令行参数。
+
+### 命令行
+
 ```bash
 # Codex -> Claude
 python session_convert.py codex2claude <rollout-*.jsonl>

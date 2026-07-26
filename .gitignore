@@ -11,3 +11,6 @@ __pycache__/
 .venv/
 *.egg-info/
 tests/.tmp/
+build/
+dist/
+*.spec
