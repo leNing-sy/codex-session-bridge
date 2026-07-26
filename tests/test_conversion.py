@@ -935,6 +935,14 @@ class DevinTests(unittest.TestCase):
             self.assertTrue(all(s.provider == "devin" for s in summaries))
 
 
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _AESGCM  # noqa: F401
+    _HAS_CRYPTOGRAPHY = True
+except ImportError:
+    _HAS_CRYPTOGRAPHY = False
+
+
+@unittest.skipUnless(_HAS_CRYPTOGRAPHY, "cryptography is not installed")
 class WindsurfTests(unittest.TestCase):
     @staticmethod
     def _make_encrypted_pb(plaintext: bytes) -> bytes:

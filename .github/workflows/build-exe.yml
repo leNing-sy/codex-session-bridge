@@ -1,0 +1,38 @@
+name: Build exe
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build and test dependencies
+        run: pip install pyinstaller cryptography
+
+      - name: Run tests
+        run: python -m unittest discover -s tests
+
+      - name: Build single-file exe
+        run: pyinstaller --onefile --console --name session-convert scripts/session_convert.py
+
+      - name: Smoke test the exe
+        run: ./dist/session-convert.exe --help
+
+      - name: Attach exe to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/session-convert.exe
+          generate_release_notes: true
