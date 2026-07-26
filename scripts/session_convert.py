@@ -36,6 +36,13 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
+# 控制台编码兜底: 在画不出中文的代码页(如 cp1252)下输出提示时不崩溃
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 HOME = os.path.expanduser("~")
 CODEX_SESSIONS_DIR = os.path.join(HOME, ".codex", "sessions")
 CODEX_INDEX_FILE = os.path.join(HOME, ".codex", "session_index.jsonl")
@@ -671,12 +678,6 @@ def _run_interactive():
 
 
 def main():
-    # 控制台编码兜底: 遇到当前代码页画不出的字符时不崩溃
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(errors="replace")
-        except (AttributeError, OSError):
-            pass
     if len(sys.argv) == 1:
         _run_interactive()
         return
