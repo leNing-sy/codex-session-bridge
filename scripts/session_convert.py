@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Claude Code <-> Codex 会话转换脚本
+
+用法:
+  python session_convert.py codex2claude <rollout.jsonl>      # Codex -> Claude
+  python session_convert.py codex2claude --latest             # 转换最新的 Codex 会话
+  python session_convert.py claude2codex <session.jsonl>      # Claude -> Codex
+  python session_convert.py claude2codex --latest             # 转换最新的 Claude 会话
+  python session_convert.py list [codex|claude]               # 列出可转换的会话
+
+默认把结果直接"安装"到目标工具的会话目录, 使其出现在对方的历史会话列表里;
+用 -o <文件> 可只输出到指定文件而不安装。
+
+格式说明 (基于实际文件逆向):
+  Codex rollout (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl):
+    每行 {timestamp, type, payload}
+    type: session_meta / response_item / event_msg / turn_context / world_state
+    response_item.payload.type: message(role=user|assistant|developer,
+      content=[{input_text|output_text}]) / reasoning(summary=[summary_text]) /
+      custom_tool_call|function_call / custom_tool_call_output|function_call_output
+  Claude session (~/.claude/projects/<项目名>/<uuid>.jsonl):
+    每行一条记录, type: user / assistant / attachment / ai-title 等
+    user.message.content = 字符串 或 [{type:tool_result,...}]
+    assistant.message.content = [{type: thinking|text|tool_use}]
+    记录之间用 parentUuid -> uuid 链接
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import sys
+import uuid
+from datetime import datetime, timezone
+
+HOME = os.path.expanduser("~")
+CODEX_SESSIONS_DIR = os.path.join(HOME, ".codex", "sessions")
+CODEX_INDEX_FILE = os.path.join(HOME, ".codex", "session_index.jsonl")
+CLAUDE_PROJECTS_DIR = os.path.join(HOME, ".claude", "projects")
+CLAUDE_VERSION = "2.1.219"  # 写入 claude 记录的 version 字段
+
+# Codex 会把 AGENTS.md / 环境上下文等包装成 user 消息塞进对话,
+# 转换成 Claude 会话时默认跳过这些非人类输入
+CONTEXT_PREFIXES = (
+    "<app-context>", "<user_instructions>", "<environment_context>",
+    "<turn-state>", "<permissions", "# AGENTS.md", "﻿# AGENTS.md",
+    "<collaboration_mode>", "<current-datetime>", "<in-app-browser-context",
+)
+
+
+def read_jsonl(path):
+    records = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass  # 跳过损坏的行
+    return records
+
+
+def write_jsonl(path, records):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        for rec in records:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def sanitize_project_dir(cwd):
+    """Claude 的项目目录名: 路径中非字母数字的字符全部替换为 '-'"""
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
+
+
+def content_to_text(content):
+    """把 codex 的 content(字符串或 [{type, text}] 列表)拍平成纯文本"""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content:
+        if isinstance(block, dict):
+            parts.append(block.get("text", ""))
+        else:
+            parts.append(str(block))
+    return "".join(parts)
+
+
+def latest_file(pattern_dir, glob_pat):
+    files = glob.glob(os.path.join(pattern_dir, glob_pat), recursive=True)
+    files = [f for f in files if os.path.isfile(f)]
+    if not files:
+        return None
+    return max(files, key=os.path.getmtime)
+
+
+# ---------------------------------------------------------------------------
+# Codex -> Claude
+# ---------------------------------------------------------------------------
+
+def codex_to_claude(src, out_path=None, install=True, include_context=False,
+                    reasoning_mode="thinking", title=None, override_cwd=None):
+    records = read_jsonl(src)
+
+    meta = next((r["payload"] for r in records if r.get("type") == "session_meta"), {})
+    cwd = override_cwd or meta.get("cwd", os.getcwd())
+    session_id = meta.get("session_id") or meta.get("id") or str(uuid.uuid4())
+
+    project_dir = os.path.join(CLAUDE_PROJECTS_DIR, sanitize_project_dir(cwd))
+    if install and out_path is None:
+        # 避免覆盖同 id 的已有 Claude 会话
+        if os.path.exists(os.path.join(project_dir, session_id + ".jsonl")):
+            session_id = str(uuid.uuid4())
+        out_path = os.path.join(project_dir, session_id + ".jsonl")
+
+    out = []
+    parent_uuid = None
+    prompt_id = str(uuid.uuid4())
+    first_user_text = None
+    # 同一个 codex 回合里的连续 assistant 块共享一个 message id
+    cur_msg_id = None
+    # Codex 会在每次恢复会话时重复记录未回答的用户输入, 用于去重
+    last_human_text = None
+
+    def base_fields(ts):
+        return {
+            "parentUuid": parent_uuid,
+            "isSidechain": False,
+            "userType": "external",
+            "cwd": cwd,
+            "sessionId": session_id,
+            "version": CLAUDE_VERSION,
+            "gitBranch": "",
+            "timestamp": ts,
+        }
+
+    def emit_user(ts, content, is_human):
+        nonlocal parent_uuid, cur_msg_id
+        rec = base_fields(ts)
+        rec.update({
+            "type": "user",
+            "promptId": prompt_id,
+            "message": {"role": "user", "content": content},
+            "uuid": str(uuid.uuid4()),
+        })
+        if is_human:
+            rec["origin"] = {"kind": "human"}
+        out.append(rec)
+        parent_uuid = rec["uuid"]
+        cur_msg_id = None  # 新一轮, 下个 assistant 块用新 message id
+
+    def emit_assistant(ts, block):
+        nonlocal parent_uuid, cur_msg_id
+        if cur_msg_id is None:
+            cur_msg_id = "msg_conv_" + uuid.uuid4().hex[:24]
+        rec = base_fields(ts)
+        rec.update({
+            "type": "assistant",
+            "message": {
+                "model": meta.get("model", "converted-from-codex"),
+                "id": cur_msg_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [block],
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            },
+            "uuid": str(uuid.uuid4()),
+        })
+        out.append(rec)
+        parent_uuid = rec["uuid"]
+
+    for rec in records:
+        if rec.get("type") != "response_item":
+            continue
+        p = rec.get("payload", {})
+        pt = p.get("type")
+        ts = rec.get("timestamp") or now_iso()
+
+        if pt == "message":
+            role = p.get("role")
+            text = content_to_text(p.get("content"))
+            if not text.strip():
+                continue
+            if role == "user":
+                stripped = text.lstrip()
+                if not include_context and stripped.startswith(CONTEXT_PREFIXES):
+                    continue
+                if text == last_human_text:
+                    continue  # 恢复会话时重复记录的同一条输入
+                last_human_text = text
+                prompt_id = str(uuid.uuid4())
+                if first_user_text is None:
+                    first_user_text = text
+                emit_user(ts, text, is_human=True)
+            elif role == "assistant":
+                last_human_text = None
+                emit_assistant(ts, {"type": "text", "text": text})
+            else:  # developer / system: 默认跳过
+                if include_context:
+                    emit_user(ts, "[%s context]\n%s" % (role, text), is_human=False)
+
+        elif pt == "reasoning":
+            if reasoning_mode == "skip":
+                continue
+            summary = "\n\n".join(
+                s.get("text", "") for s in p.get("summary", []) if s.get("text")
+            )
+            if not summary.strip():
+                continue
+            if reasoning_mode == "text":
+                emit_assistant(ts, {"type": "text", "text": summary})
+            else:
+                emit_assistant(ts, {"type": "thinking", "thinking": summary,
+                                    "signature": ""})
+
+        elif pt in ("custom_tool_call", "function_call"):
+            name = p.get("name", "tool")
+            call_id = p.get("call_id") or p.get("id") or "call_" + uuid.uuid4().hex[:20]
+            if pt == "function_call":
+                raw = p.get("arguments", "")
+                try:
+                    tool_input = json.loads(raw) if raw else {}
+                    if not isinstance(tool_input, dict):
+                        tool_input = {"arguments": tool_input}
+                except json.JSONDecodeError:
+                    tool_input = {"arguments": raw}
+            else:
+                # custom_tool_call 的 input 是自由格式字符串(如 JS 代码)
+                tool_input = {"input": p.get("input", "")}
+            emit_assistant(ts, {"type": "tool_use", "id": call_id,
+                                "name": name, "input": tool_input})
+
+        elif pt in ("custom_tool_call_output", "function_call_output"):
+            call_id = p.get("call_id") or ""
+            text = content_to_text(p.get("output"))
+            emit_user(ts, [{"tool_use_id": call_id, "type": "tool_result",
+                            "content": text}], is_human=False)
+
+    if not out:
+        sys.exit("没有可转换的对话内容: %s" % src)
+
+    # 会话标题, 显示在 Claude 的历史会话列表里
+    if title:
+        out.append({"type": "custom-title", "customTitle": title,
+                    "sessionId": session_id})
+
+    if out_path is None:
+        out_path = os.path.splitext(src)[0] + ".claude.jsonl"
+    write_jsonl(out_path, out)
+
+    n_user = sum(1 for r in out if r["type"] == "user" and isinstance(r["message"]["content"], str))
+    print("Codex -> Claude 转换完成")
+    print("  来源: %s" % src)
+    print("  输出: %s" % out_path)
+    print("  记录: %d 条 (人类消息 %d 条), cwd=%s" % (len(out), n_user, cwd))
+    if install and out_path.startswith(CLAUDE_PROJECTS_DIR):
+        print("  已安装到 Claude 项目目录, 在 %s 下运行 claude 后可在历史会话中恢复" % cwd)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Claude -> Codex
+# ---------------------------------------------------------------------------
+
+def claude_to_codex(src, out_path=None, install=True):
+    records = read_jsonl(src)
+
+    conv = [r for r in records if r.get("type") in ("user", "assistant")
+            and not r.get("isSidechain")]
+    if not conv:
+        sys.exit("没有可转换的对话内容: %s" % src)
+
+    first = conv[0]
+    cwd = first.get("cwd", os.getcwd())
+    session_id = first.get("sessionId") or str(uuid.uuid4())
+    start_ts = first.get("timestamp") or now_iso()
+
+    out = []
+    first_user_text = None
+
+    def wrap(ts, rtype, payload):
+        out.append({"timestamp": ts, "type": rtype, "payload": payload})
+
+    # 会话头
+    wrap(start_ts, "session_meta", {
+        "session_id": session_id, "id": session_id, "timestamp": start_ts,
+        "cwd": cwd, "originator": "session_convert",
+        "cli_version": "converted-from-claude", "source": "import",
+        "thread_source": "user", "model_provider": "anthropic",
+    })
+
+    for rec in conv:
+        ts = rec.get("timestamp") or now_iso()
+        msg = rec.get("message", {})
+        content = msg.get("content")
+
+        if rec["type"] == "user":
+            if isinstance(content, str):
+                if first_user_text is None:
+                    first_user_text = content
+                wrap(ts, "event_msg", {
+                    "type": "user_message", "message": content,
+                    "images": [], "local_images": [], "audio": [],
+                    "local_audio": [], "text_elements": [],
+                })
+                wrap(ts, "response_item", {
+                    "type": "message",
+                    "id": "msg_" + uuid.uuid4().hex[:24],
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": content}],
+                })
+            elif isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "tool_result":
+                        result = block.get("content", "")
+                        if isinstance(result, list):
+                            result = "".join(
+                                b.get("text", "") for b in result
+                                if isinstance(b, dict))
+                        wrap(ts, "response_item", {
+                            "type": "function_call_output",
+                            "id": "fco_" + uuid.uuid4().hex[:24],
+                            "call_id": block.get("tool_use_id", ""),
+                            "output": [{"type": "input_text", "text": str(result)}],
+                        })
+                    elif block.get("type") == "text" and block.get("text", "").strip():
+                        wrap(ts, "response_item", {
+                            "type": "message",
+                            "id": "msg_" + uuid.uuid4().hex[:24],
+                            "role": "user",
+                            "content": [{"type": "input_text",
+                                         "text": block["text"]}],
+                        })
+
+        else:  # assistant
+            for block in (content or []):
+                if not isinstance(block, dict):
+                    continue
+                bt = block.get("type")
+                if bt == "text" and block.get("text", "").strip():
+                    wrap(ts, "event_msg", {
+                        "type": "agent_message", "message": block["text"],
+                        "phase": "final",
+                    })
+                    wrap(ts, "response_item", {
+                        "type": "message",
+                        "id": "msg_" + uuid.uuid4().hex[:24],
+                        "role": "assistant",
+                        "content": [{"type": "output_text",
+                                     "text": block["text"]}],
+                    })
+                elif bt == "thinking" and block.get("thinking", "").strip():
+                    wrap(ts, "response_item", {
+                        "type": "reasoning",
+                        "id": "rs_" + uuid.uuid4().hex[:24],
+                        "summary": [{"type": "summary_text",
+                                     "text": block["thinking"]}],
+                    })
+                elif bt == "tool_use":
+                    wrap(ts, "response_item", {
+                        "type": "function_call",
+                        "id": "fc_" + uuid.uuid4().hex[:24],
+                        "name": block.get("name", "tool"),
+                        "arguments": json.dumps(block.get("input", {}),
+                                                ensure_ascii=False),
+                        "call_id": block.get("id", ""),
+                    })
+
+    if install and out_path is None:
+        try:
+            dt = datetime.fromisoformat(start_ts.replace("Z", "+00:00"))
+        except ValueError:
+            dt = datetime.now(timezone.utc)
+        day_dir = os.path.join(CODEX_SESSIONS_DIR, dt.strftime("%Y"),
+                               dt.strftime("%m"), dt.strftime("%d"))
+        fname = "rollout-%s-%s.jsonl" % (dt.strftime("%Y-%m-%dT%H-%M-%S"), session_id)
+        out_path = os.path.join(day_dir, fname)
+        if os.path.exists(out_path):
+            session_id = str(uuid.uuid4())
+            out[0]["payload"]["session_id"] = session_id
+            out[0]["payload"]["id"] = session_id
+            out_path = os.path.join(
+                day_dir, "rollout-%s-%s.jsonl" % (dt.strftime("%Y-%m-%dT%H-%M-%S"),
+                                                  session_id))
+    if out_path is None:
+        out_path = os.path.splitext(src)[0] + ".codex.jsonl"
+    write_jsonl(out_path, out)
+
+    # 追加到 codex 会话索引, 让它出现在历史列表里
+    if install and out_path.startswith(CODEX_SESSIONS_DIR):
+        title = (first_user_text or "imported from claude").strip()
+        title = title.splitlines()[0][:60]
+        entry = {"id": session_id, "thread_name": title,
+                 "updated_at": now_iso()}
+        with open(CODEX_INDEX_FILE, "a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    print("Claude -> Codex 转换完成")
+    print("  来源: %s" % src)
+    print("  输出: %s" % out_path)
+    print("  记录: %d 条, cwd=%s" % (len(out), cwd))
+    if install and out_path.startswith(CODEX_SESSIONS_DIR):
+        print("  已安装到 Codex 会话目录并写入索引")
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# 辅助: 列出会话
+# ---------------------------------------------------------------------------
+
+def list_sessions(which):
+    if which in ("codex", "all"):
+        print("== Codex 会话 (%s) ==" % CODEX_SESSIONS_DIR)
+        files = sorted(
+            glob.glob(os.path.join(CODEX_SESSIONS_DIR, "**", "rollout-*.jsonl"),
+                      recursive=True),
+            key=os.path.getmtime, reverse=True)
+        for f in files[:20]:
+            print("  %s  (%.0f KB)" % (f, os.path.getsize(f) / 1024))
+    if which in ("claude", "all"):
+        print("== Claude 会话 (%s) ==" % CLAUDE_PROJECTS_DIR)
+        files = sorted(
+            glob.glob(os.path.join(CLAUDE_PROJECTS_DIR, "*", "*.jsonl")),
+            key=os.path.getmtime, reverse=True)
+        for f in files[:20]:
+            print("  %s  (%.0f KB)" % (f, os.path.getsize(f) / 1024))
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Claude Code 与 Codex 会话互相转换",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p1 = sub.add_parser("codex2claude", help="Codex rollout -> Claude 会话")
+    p1.add_argument("input", nargs="?", help="Codex rollout-*.jsonl 文件路径")
+    p1.add_argument("--latest", action="store_true", help="使用最新的 Codex 会话")
+    p1.add_argument("-o", "--output", help="只输出到该文件, 不安装到 Claude 目录")
+    p1.add_argument("--include-context", action="store_true",
+                    help="保留 AGENTS.md / 环境上下文等注入消息")
+    p1.add_argument("--reasoning", choices=["thinking", "text", "skip"],
+                    default="thinking", help="推理摘要的转换方式 (默认 thinking)")
+    p1.add_argument("--title", help="设置 Claude 会话标题 (默认无)")
+    p1.add_argument("--claude-cwd", help="覆盖会话 cwd, 决定装到哪个 Claude 项目目录")
+
+    p2 = sub.add_parser("claude2codex", help="Claude 会话 -> Codex rollout")
+    p2.add_argument("input", nargs="?", help="Claude 会话 .jsonl 文件路径")
+    p2.add_argument("--latest", action="store_true", help="使用最新的 Claude 会话")
+    p2.add_argument("-o", "--output", help="只输出到该文件, 不安装到 Codex 目录")
+
+    p3 = sub.add_parser("list", help="列出可转换的会话文件")
+    p3.add_argument("which", nargs="?", choices=["codex", "claude", "all"],
+                    default="all")
+
+    args = ap.parse_args()
+
+    if args.cmd == "list":
+        list_sessions(args.which)
+        return
+
+    if args.latest:
+        if args.cmd == "codex2claude":
+            src = latest_file(CODEX_SESSIONS_DIR, os.path.join("**", "rollout-*.jsonl"))
+        else:
+            src = latest_file(CLAUDE_PROJECTS_DIR, os.path.join("*", "*.jsonl"))
+        if not src:
+            sys.exit("找不到会话文件")
+        print("使用最新会话: %s" % src)
+    elif args.input:
+        src = args.input
+        if not os.path.isfile(src):
+            sys.exit("文件不存在: %s" % src)
+    else:
+        sys.exit("请指定输入文件或使用 --latest")
+
+    install = args.output is None
+    if args.cmd == "codex2claude":
+        codex_to_claude(src, out_path=args.output, install=install,
+                        include_context=args.include_context,
+                        reasoning_mode=args.reasoning, title=args.title,
+                        override_cwd=args.claude_cwd)
+    else:
+        claude_to_codex(src, out_path=args.output, install=install)
+
+
+if __name__ == "__main__":
+    main()

@@ -98,6 +98,24 @@ python -m venv .venv
 `--claude-session-dir` 指定其他位置。当前已通过合成 Claude Code JSONL 测试；在真实会话完成 Codex
 桌面端续聊验证前，该适配器保持预览状态。
 
+### 独立脚本：Codex <-> Claude 双向转换（scripts/）
+
+[`scripts/session_convert.py`](scripts/session_convert.py) 是一个无依赖的单文件脚本，
+与 `codex_bridge` 互补：
+
+- 支持 **Codex -> Claude Code** 方向（`codex_bridge` 目前只做导入 Codex）；
+- 保留工具调用、工具结果和推理摘要（转成 thinking 块），不只是纯文本回合；
+- 自动过滤 Codex 注入的隐藏上下文消息（AGENTS.md、`<environment_context>`、
+  `<in-app-browser-context>` 等），并对恢复会话产生的重复用户输入去重；
+- 转换结果已在 Claude Code 真实续聊场景验证。
+
+```powershell
+python scripts/session_convert.py codex2claude --latest
+python scripts/session_convert.py claude2codex --latest
+```
+
+详细用法、两种格式的逆向说明和已知限制见 [scripts/README.md](scripts/README.md)。
+
 ## 安全设计
 
 正式导入采用以下顺序：
