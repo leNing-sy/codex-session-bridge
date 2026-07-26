@@ -22,6 +22,8 @@
 - 写入失败或验证失败时自动回滚。
 - 安装后验证轮次数、消息数、索引和数据库状态。
 - 预览支持 Claude Code JSONL 会话，复用同一套 Codex 安装、备份和验证流程。
+- 修复共享提取层的四类泄漏：Claude 子代理/isMeta/斜杠命令噪声混入、Codex 隐藏
+  上下文标记漏匹配、恢复会话重复输入、增量导出的路径计算错误（均有回归测试）。
 
 下一阶段：
 
@@ -105,9 +107,22 @@ python -m venv .venv
 
 - 支持 **Codex -> Claude Code** 方向（`codex_bridge` 目前只做导入 Codex）；
 - 保留工具调用、工具结果和推理摘要（转成 thinking 块），不只是纯文本回合；
-- 自动过滤 Codex 注入的隐藏上下文消息（AGENTS.md、`<environment_context>`、
-  `<in-app-browser-context>` 等），并对恢复会话产生的重复用户输入去重；
+- 双向清理注入消息：Codex 侧过滤 AGENTS.md、`<environment_context>`、
+  `<in-app-browser-context>` 等隐藏上下文并对恢复会话产生的重复输入去重，
+  Claude 侧过滤斜杠命令、本地命令输出、`<system-reminder>` 等记录；
+- claude2codex 会注册 Codex 桌面端读取的 `state_5.sqlite` threads 表，
+  转完直接出现在历史列表；
 - 转换结果已在 Claude Code 真实续聊场景验证。
+
+**交互模式**：不带参数运行进入菜单——选方向、从最近会话列表（带标题和时间）
+选一个，自动转换并安装。可用 PyInstaller 打成免安装的单文件 exe，双击即用：
+
+```powershell
+pip install pyinstaller
+pyinstaller --onefile --console --name session-convert scripts/session_convert.py
+```
+
+命令行用法：
 
 ```powershell
 python scripts/session_convert.py codex2claude --latest
