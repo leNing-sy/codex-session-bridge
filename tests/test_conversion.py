@@ -29,6 +29,31 @@ class PathTests(unittest.TestCase):
         self.assertEqual(encode_pi_cwd(r"C:\home\user"), "--C--home-user--")
         self.assertEqual(encode_pi_cwd(r"C:\projects\repo"), "--C--projects-repo--")
 
+    def test_cross_format_ids_are_stable_when_preserving_ids(self) -> None:
+        factory = SessionIdFactory(preserve_ids=True)
+        codex_first = factory.create_codex("ses_example")
+        codex_second = factory.create_codex("ses_example")
+        opencode_first = factory.create_opencode(
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "2026-07-01T10:00:00.000Z",
+        )
+        opencode_second = factory.create_opencode(
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "2026-07-02T10:00:00.000Z",
+        )
+        self.assertEqual(codex_first, codex_second)
+        self.assertEqual(opencode_first, opencode_second)
+        self.assertTrue(opencode_first.startswith("ses_"))
+
+    def test_new_id_mode_remains_random(self) -> None:
+        factory = SessionIdFactory(preserve_ids=False)
+        self.assertNotEqual(factory.create_codex("ses_example"),
+                            factory.create_codex("ses_example"))
+        self.assertNotEqual(
+            factory.create_opencode("source", "2026-07-01T10:00:00.000Z"),
+            factory.create_opencode("source", "2026-07-01T10:00:00.000Z"),
+        )
+
 
 class ConversionTests(unittest.TestCase):
     def _write_codex_fixture(self, codex_home: Path, session_id: str) -> Path:

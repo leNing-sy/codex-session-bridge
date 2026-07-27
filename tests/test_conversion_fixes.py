@@ -241,11 +241,75 @@ class ConverterRoundTripTests(unittest.TestCase):
             claude_store = ClaudeStore(root / "claude")
             converter = CodexToClaudeConverter(codex_store, claude_store, SessionIdFactory())
             plan = converter.plan(session_id)
-            # Write a destination at the cwd-derived path with exactly as many
-            # records as the source file; has_changes must find it there.
-            padded = plan.records + [{"type": "user", "message": {"role": "user", "content": "pad"}, "uuid": "pad", "parentUuid": None}]
-            JsonlFile(plan.destination).write(padded, overwrite=True)
+            JsonlFile(plan.destination).write(plan.records, overwrite=True)
             self.assertFalse(converter.has_changes(session_id))
+
+    def test_codex_to_claude_update_refuses_target_side_continuation(self) -> None:
+        session_id = "0197e001-0000-7000-8000-000000000004"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta = {
+                "timestamp": "2026-07-01T10:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "timestamp": "2026-07-01T10:00:00.000Z",
+                    "cwd": r"C:\projects\demo",
+                },
+            }
+            self._codex_home(
+                root / "codex", session_id,
+                [meta, _codex_user("question"), _codex_assistant("answer")],
+            )
+            converter = CodexToClaudeConverter(
+                CodexStore(root / "codex"), ClaudeStore(root / "claude"),
+                SessionIdFactory(),
+            )
+            plan = converter.plan(session_id)
+            continuation = {
+                "type": "user",
+                "message": {"role": "user", "content": "target-only follow-up"},
+                "uuid": "target-only",
+                "parentUuid": plan.records[-1]["uuid"],
+                "sessionId": session_id,
+                "cwd": r"C:\projects\demo",
+                "timestamp": "2026-07-01T10:10:00.000Z",
+            }
+            JsonlFile(plan.destination).write(
+                plan.records + [continuation], overwrite=True)
+            self.assertFalse(converter.has_changes(session_id))
+
+    def test_codex_to_claude_update_accepts_source_extension(self) -> None:
+        session_id = "0197e001-0000-7000-8000-000000000005"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta = {
+                "timestamp": "2026-07-01T10:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "timestamp": "2026-07-01T10:00:00.000Z",
+                    "cwd": r"C:\projects\demo",
+                },
+            }
+            source_path = self._codex_home(
+                root / "codex", session_id,
+                [meta, _codex_user("question"), _codex_assistant("answer")],
+            )
+            converter = CodexToClaudeConverter(
+                CodexStore(root / "codex"), ClaudeStore(root / "claude"),
+                SessionIdFactory(),
+            )
+            initial = converter.plan(session_id)
+            JsonlFile(initial.destination).write(initial.records, overwrite=True)
+            extended_records = JsonlFile(source_path).read() + [
+                _codex_user("follow-up", "2026-07-01T10:10:00.000Z")]
+            JsonlFile(source_path).write(extended_records, overwrite=True)
+            converter = CodexToClaudeConverter(
+                CodexStore(root / "codex"), ClaudeStore(root / "claude"),
+                SessionIdFactory(),
+            )
+            self.assertTrue(converter.has_changes(session_id))
 
     def test_claude_to_codex_drops_command_noise(self) -> None:
         session_id = "c1a9e2d4-0000-4000-8000-000000000003"
@@ -463,6 +527,208 @@ class ConvertScriptTests(unittest.TestCase):
                 self.assertTrue((Path(tmp) / "relative-out.jsonl").is_file())
             finally:
                 os.chdir(cwd)
+
+    def test_all_four_directions_skip_existing_output_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex = root / "rollout.jsonl"
+            claude = root / "claude.jsonl"
+            opencode_db = root / "opencode.db"
+            outputs = [
+                root / "codex-to-claude.jsonl",
+                root / "claude-to-codex.jsonl",
+                root / "opencode-to-codex.jsonl",
+                root / "codex-to-opencode.json",
+            ]
+            codex.write_text("".join(json.dumps(r) + "\n" for r in [
+                {
+                    "timestamp": "2026-07-01T10:00:00.000Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "01234567-89ab-cdef-0123-456789abcdef",
+                        "timestamp": "2026-07-01T10:00:00.000Z",
+                        "cwd": r"C:\projects\demo",
+                    },
+                },
+                _codex_user("question"),
+                _codex_assistant("answer"),
+            ]), encoding="utf-8")
+            claude.write_text("".join(json.dumps(r) + "\n" for r in [
+                _claude_record("user", "question"),
+                _claude_record("assistant", [{"type": "text", "text": "answer"}]),
+            ]), encoding="utf-8")
+            self._make_opencode_db(opencode_db)
+
+            self.script.codex_to_claude(str(codex), str(outputs[0]), install=False)
+            self.script.claude_to_codex(str(claude), str(outputs[1]), install=False)
+            self.script.opencode_to_codex(
+                "ses_1", str(outputs[2]), install=False, db=str(opencode_db))
+            self.script.codex_to_opencode(str(codex), str(outputs[3]))
+            first = [path.read_bytes() for path in outputs]
+
+            self.script.codex_to_claude(str(codex), str(outputs[0]), install=False)
+            self.script.claude_to_codex(str(claude), str(outputs[1]), install=False)
+            self.script.opencode_to_codex(
+                "ses_1", str(outputs[2]), install=False, db=str(opencode_db))
+            self.script.codex_to_opencode(str(codex), str(outputs[3]))
+
+            self.assertEqual([path.read_bytes() for path in outputs], first)
+
+    def test_opencode_to_codex_uses_stable_target_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "opencode.db"
+            first = root / "first.jsonl"
+            second = root / "second.jsonl"
+            self._make_opencode_db(db)
+            self.script.opencode_to_codex(
+                "ses_1", str(first), install=False, db=str(db))
+            self.script.opencode_to_codex(
+                "ses_1", str(second), install=False, db=str(db))
+            first_id = json.loads(first.read_text(encoding="utf-8").splitlines()[0])[
+                "payload"]["id"]
+            second_id = json.loads(second.read_text(encoding="utf-8").splitlines()[0])[
+                "payload"]["id"]
+            self.assertEqual(first_id, second_id)
+
+    def test_codex_index_upsert_does_not_duplicate_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            index = Path(tmp) / "session_index.jsonl"
+            original = self.script.CODEX_INDEX_FILE
+            self.script.CODEX_INDEX_FILE = str(index)
+            try:
+                self.script.upsert_codex_index("session-1", "Title one")
+                self.script.upsert_codex_index("session-1", "Title two")
+            finally:
+                self.script.CODEX_INDEX_FILE = original
+            entries = [json.loads(line) for line in index.read_text(
+                encoding="utf-8-sig").splitlines()]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["thread_name"], "Title two")
+
+    def test_codex_index_upsert_preserves_unparseable_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            index = Path(tmp) / "session_index.jsonl"
+            index.write_text("not-json\n", encoding="utf-8")
+            original = self.script.CODEX_INDEX_FILE
+            self.script.CODEX_INDEX_FILE = str(index)
+            try:
+                self.script.upsert_codex_index("session-1", "Title")
+            finally:
+                self.script.CODEX_INDEX_FILE = original
+            lines = index.read_text(encoding="utf-8-sig").splitlines()
+            self.assertEqual(lines[0], "not-json")
+            self.assertEqual(json.loads(lines[1])["id"], "session-1")
+
+    def test_fork_updates_embedded_ids_for_custom_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex = root / "rollout.jsonl"
+            claude = root / "claude.jsonl"
+            db = root / "opencode.db"
+            codex.write_text("".join(json.dumps(r) + "\n" for r in [
+                {
+                    "timestamp": "2026-07-01T10:00:00.000Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "01234567-89ab-cdef-0123-456789abcdef",
+                        "timestamp": "2026-07-01T10:00:00.000Z",
+                        "cwd": r"C:\projects\demo",
+                    },
+                },
+                _codex_user("question"),
+            ]), encoding="utf-8")
+            claude.write_text("".join(json.dumps(r) + "\n" for r in [
+                _claude_record("user", "question"),
+            ]), encoding="utf-8")
+            self._make_opencode_db(db)
+
+            claude_out = root / "claude-target.jsonl"
+            codex_out = root / "codex-target.jsonl"
+            opencode_codex_out = root / "oc-codex-target.jsonl"
+            opencode_out = root / "opencode-target.json"
+            for path in (claude_out, codex_out, opencode_codex_out, opencode_out):
+                path.write_text("occupied", encoding="utf-8")
+
+            claude_fork = Path(self.script.codex_to_claude(
+                str(codex), str(claude_out), install=False, on_conflict="fork"))
+            codex_fork = Path(self.script.claude_to_codex(
+                str(claude), str(codex_out), install=False, on_conflict="fork"))
+            oc_codex_fork = Path(self.script.opencode_to_codex(
+                "ses_1", str(opencode_codex_out), install=False, db=str(db),
+                on_conflict="fork"))
+            opencode_fork = Path(self.script.codex_to_opencode(
+                str(codex), str(opencode_out), on_conflict="fork"))
+
+            claude_record = json.loads(claude_fork.read_text(
+                encoding="utf-8").splitlines()[0])
+            codex_record = json.loads(codex_fork.read_text(
+                encoding="utf-8").splitlines()[0])
+            oc_codex_record = json.loads(oc_codex_fork.read_text(
+                encoding="utf-8").splitlines()[0])
+            opencode_export = json.loads(opencode_fork.read_text(encoding="utf-8"))
+            self.assertIn(claude_record["sessionId"][:8], claude_fork.name)
+            self.assertIn(codex_record["payload"]["id"][:8], codex_fork.name)
+            self.assertIn(oc_codex_record["payload"]["id"][:8], oc_codex_fork.name)
+            self.assertIn(opencode_export["info"]["id"][4:12], opencode_fork.name)
+
+    def test_isolated_installs_are_idempotent_and_cleaned_up(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="session-bridge-isolation-") as tmp:
+            root = Path(tmp)
+            codex_source = root / "source-rollout.jsonl"
+            claude_source = root / "source-claude.jsonl"
+            db = root / "opencode.db"
+            opencode_export = root / "codex.opencode.json"
+            codex_source.write_text("".join(json.dumps(r) + "\n" for r in [
+                {
+                    "timestamp": "2026-07-01T10:00:00.000Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "01234567-89ab-cdef-0123-456789abcdef",
+                        "timestamp": "2026-07-01T10:00:00.000Z",
+                        "cwd": r"C:\projects\demo",
+                    },
+                },
+                _codex_user("question"),
+                _codex_assistant("answer"),
+            ]), encoding="utf-8")
+            claude_source.write_text("".join(json.dumps(r) + "\n" for r in [
+                _claude_record("user", "question"),
+                _claude_record("assistant", [{"type": "text", "text": "answer"}]),
+            ]), encoding="utf-8")
+            self._make_opencode_db(db)
+
+            originals = {
+                "HOME": self.script.HOME,
+                "CODEX_SESSIONS_DIR": self.script.CODEX_SESSIONS_DIR,
+                "CODEX_INDEX_FILE": self.script.CODEX_INDEX_FILE,
+                "CLAUDE_PROJECTS_DIR": self.script.CLAUDE_PROJECTS_DIR,
+                "CLAUDE_DESKTOP_DIR": self.script.CLAUDE_DESKTOP_DIR,
+            }
+            self.script.HOME = str(root)
+            self.script.CODEX_SESSIONS_DIR = str(root / ".codex" / "sessions")
+            self.script.CODEX_INDEX_FILE = str(root / ".codex" / "session_index.jsonl")
+            self.script.CLAUDE_PROJECTS_DIR = str(root / ".claude" / "projects")
+            self.script.CLAUDE_DESKTOP_DIR = str(root / "claude-desktop")
+            try:
+                for _ in range(2):
+                    self.script.codex_to_claude(str(codex_source))
+                    self.script.claude_to_codex(str(claude_source))
+                    self.script.opencode_to_codex("ses_1", db=str(db))
+                    self.script.codex_to_opencode(
+                        str(codex_source), str(opencode_export))
+
+                claude_files = list((root / ".claude" / "projects").rglob("*.jsonl"))
+                codex_files = list((root / ".codex" / "sessions").rglob("*.jsonl"))
+                index_lines = (root / ".codex" / "session_index.jsonl").read_text(
+                    encoding="utf-8-sig").splitlines()
+                self.assertEqual(len(claude_files), 1)
+                self.assertEqual(len(codex_files), 2)
+                self.assertEqual(len(index_lines), 2)
+                self.assertTrue(opencode_export.is_file())
+            finally:
+                for name, value in originals.items():
+                    setattr(self.script, name, value)
 
     def _make_desktop_registry(self, root: Path) -> Path:
         target = root / "org-1" / "user-1"

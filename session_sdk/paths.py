@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import string
 import sys
 from datetime import UTC, datetime
@@ -22,11 +23,20 @@ class SessionIdFactory:
     def create_codex(self, source_id: str) -> str:
         if self._preserve_ids and is_uuid(source_id):
             return source_id
+        if self._preserve_ids:
+            return str(UUID(bytes=hashlib.sha256(
+                ("codex-session-bridge:codex:" + source_id).encode("utf-8")
+            ).digest()[:16], version=5))
         return str(uuid4())
 
     def create_opencode(self, source_id: str, timestamp: str) -> str:
         if self._preserve_ids and source_id.startswith("ses_"):
             return source_id
+        if self._preserve_ids:
+            digest = hashlib.sha256(
+                ("codex-session-bridge:opencode:" + source_id).encode("utf-8")
+            ).hexdigest()
+            return "ses_" + digest[:26]
         return opencode_id("ses", timestamp)
 
 

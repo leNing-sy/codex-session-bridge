@@ -1,6 +1,6 @@
 [project]
 name = "codex-session-bridge"
-version = "0.1.0"
+version = "0.4.1"
 description = "Import OpenCode, Claude Code, and other AI coding sessions into Codex as visible, resumable desktop threads."
 readme = "README.md"
 license = "MIT"

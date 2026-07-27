@@ -29,6 +29,31 @@ def _count_opencode_records(path: Path) -> int:
     return 0
 
 
+def _message_signature(message: TextMessage) -> tuple[str, str, bool, bool]:
+    return (
+        message.role,
+        message.text.strip(),
+        message.is_compaction,
+        message.is_contextual,
+    )
+
+
+def _has_safe_message_update(
+    source: list[TextMessage], destination: list[TextMessage]
+) -> bool:
+    source_signatures = [
+        _message_signature(message) for message in source
+        if not message.is_contextual
+    ]
+    destination_signatures = [
+        _message_signature(message) for message in destination
+        if not message.is_contextual
+    ]
+    if source_signatures == destination_signatures:
+        return False
+    return destination_signatures == source_signatures[:len(destination_signatures)]
+
+
 class Encoding(Protocol):
     def encode(self, text: str) -> list[int]:
         raise NotImplementedError
@@ -972,17 +997,14 @@ class CodexToOpenCodeConverter:
         return ConversionPlan(source, self._opencode_store.destination_path(resolved_id), records)
 
     def has_changes(self, session_id: str) -> bool:
-        source_path = self._codex_store._find_path(session_id)
-        if source_path is None:
+        plan = self.plan(session_id)
+        if not plan.destination.exists():
             return True
-        meta = self._codex_store._read_head_meta(source_path)
-        source_id = string_value(meta, "id") or self._codex_store._id_from_filename(source_path)
-        source_ts = string_value(meta, "timestamp") or self._codex_store._timestamp_from_file(source_path)
-        target_id = self._id_factory.create_opencode(source_id, self._timestamp(source_ts))
-        destination = self._opencode_store.destination_path(target_id)
-        if not destination.exists():
-            return True
-        return _count_jsonl_records(source_path) != _count_opencode_records(destination)
+        target = self._opencode_store.load_path(plan.destination)
+        return _has_safe_message_update(
+            self._extractor.from_codex(plan.source),
+            self._extractor.from_opencode(target),
+        )
 
     def write(self, plan: ConversionPlan, *, overwrite: bool = False) -> None:
         self._opencode_store.write(plan.destination, plan.records, overwrite=overwrite)
@@ -1049,16 +1071,14 @@ class OpenCodeToCodexConverter:
         return ConversionPlan(source, destination, records)
 
     def has_changes(self, session_id: str) -> bool:
-        source_path = self._opencode_store._find_path(session_id)
-        if source_path is None:
+        plan = self.plan(session_id)
+        if not plan.destination.exists():
             return True
-        destination = self._codex_store.destination_path(
-            self._id_factory.create_codex(session_id),
-            self._timestamp(""),
+        target = self._codex_store.load_path(plan.destination)
+        return _has_safe_message_update(
+            self._extractor.from_opencode(plan.source),
+            self._extractor.from_codex(target),
         )
-        if not destination.exists():
-            return True
-        return _count_opencode_records(source_path) != _count_jsonl_records(destination)
 
     def write(self, plan: ConversionPlan, *, overwrite: bool = False) -> None:
         self._codex_store.write(plan.destination, plan.records, overwrite=overwrite)
@@ -1222,13 +1242,14 @@ class ClaudeToCodexConverter:
         return ConversionPlan(source, destination, records)
 
     def has_changes(self, session_id: str) -> bool:
-        source_path = self._claude_store._find_path(session_id)
-        if source_path is None:
+        plan = self.plan(session_id)
+        if not plan.destination.exists():
             return True
-        destination = self._codex_store.destination_path(self._id_factory.create_codex(session_id), self._timestamp(""))
-        if not destination.exists():
-            return True
-        return _count_jsonl_records(source_path) != _count_jsonl_records(destination)
+        target = self._codex_store.load_path(plan.destination)
+        return _has_safe_message_update(
+            self._extractor.from_claude(plan.source),
+            self._extractor.from_codex(target),
+        )
 
     def write(self, plan: ConversionPlan, *, overwrite: bool = False) -> None:
         self._codex_store.write(plan.destination, plan.records, overwrite=overwrite)
@@ -1258,15 +1279,14 @@ class CodexToClaudeConverter:
         return ConversionPlan(source, destination, records)
 
     def has_changes(self, session_id: str) -> bool:
-        source_path = self._codex_store._find_path(session_id)
-        if source_path is None:
+        plan = self.plan(session_id)
+        if not plan.destination.exists():
             return True
-        meta = self._codex_store._read_head_meta(source_path)
-        cwd = string_value(meta, "cwd") or ""
-        destination = self._claude_store.destination_path(self._id_factory.create(session_id), cwd)
-        if not destination.exists():
-            return True
-        return _count_jsonl_records(source_path) != _count_jsonl_records(destination)
+        target = self._claude_store.load_path(plan.destination)
+        return _has_safe_message_update(
+            self._extractor.from_codex(plan.source),
+            self._extractor.from_claude(target),
+        )
 
     def write(self, plan: ConversionPlan, *, overwrite: bool = False) -> None:
         self._claude_store.write(plan.destination, plan.records, overwrite=overwrite)

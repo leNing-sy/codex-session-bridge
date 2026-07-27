@@ -16,7 +16,7 @@ from session_sdk.json_types import JsonObject
 from session_sdk.jsonl import JsonlFile
 
 
-BRIDGE_VERSION = "0.1.0"
+BRIDGE_VERSION = "0.4.1"
 
 
 def iso_from_ms(timestamp_ms: int) -> str:

@@ -55,8 +55,8 @@ factory = SessionIdFactory(preserve_ids=False)
 | Method | Behavior |
 |---|---|
 | `create(source_id)` | Returns `source_id` if `preserve_ids=True`, otherwise a new UUID v4. Used for Pi and Claude targets. |
-| `create_codex(source_id)` | Returns `source_id` if it is a valid UUID and `preserve_ids=True`, otherwise a new UUID v4. Used for Codex targets. |
-| `create_opencode(source_id, timestamp)` | Returns `source_id` if it starts with `ses_` and `preserve_ids=True`, otherwise generates a new OpenCode-style descending ID via `opencode_id("ses", timestamp)`. |
+| `create_codex(source_id)` | Preserves valid UUIDs. Other source IDs map to a deterministic UUID when `preserve_ids=True`; `preserve_ids=False` generates UUID v4 values. |
+| `create_opencode(source_id, timestamp)` | Preserves `ses_` IDs. Other source IDs map to a deterministic `ses_` ID when `preserve_ids=True`; `preserve_ids=False` generates a fresh OpenCode-style ID. |
 
 ## encode_pi_cwd
 

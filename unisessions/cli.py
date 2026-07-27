@@ -51,7 +51,7 @@ from session_sdk.converters import (
     WindsurfToPiConverter,
 )
 from session_sdk.models import ConversionPlan, SessionSummary
-from session_sdk.paths import SessionIdFactory, WindowsDefaults
+from session_sdk.paths import SessionIdFactory, WindowsDefaults, opencode_id
 from session_sdk.stores import ClaudeStore, CodexStore, DevinStore, FactoryStore, OpenCodeStore, PiDcpStore, PiStore, WindsurfStore
 from session_sdk.traces import TRACE_FORMATS, build_trace
 from session_sdk.converters import MessageExtractor
@@ -122,10 +122,14 @@ class CliApp:
             return self._single_convert(args, codex, pi, dcp, opencode, claude, devin, factory, windsurf, id_factory)
 
         if args.command == "codex-to-pi-all":
-            return self._bulk_export(codex, pi, dcp, opencode, id_factory, args, targets=["pi"])
+            return self._bulk_export(
+                codex, pi, dcp, opencode, claude, devin, factory, windsurf,
+                id_factory, args, targets=["pi"])
 
         if args.command == "export-all":
-            return self._bulk_export(codex, pi, dcp, opencode, id_factory, args, targets=args.targets)
+            return self._bulk_export(
+                codex, pi, dcp, opencode, claude, devin, factory, windsurf,
+                id_factory, args, targets=args.targets)
 
         raise ValueError(f"Unsupported command: {args.command}")
 
@@ -317,6 +321,10 @@ class CliApp:
         pi: PiStore,
         dcp: PiDcpStore,
         opencode: OpenCodeStore,
+        claude: ClaudeStore,
+        devin: DevinStore,
+        factory: FactoryStore,
+        windsurf: WindsurfStore,
         id_factory: SessionIdFactory,
         args: argparse.Namespace,
         targets: list[str],
@@ -329,8 +337,14 @@ class CliApp:
             print("Dry run -- use --write to export.")
             return 0
 
-        pi_converter = CodexToPiConverter(codex, pi, dcp, id_factory)
-        opencode_converter = CodexToOpenCodeConverter(codex, opencode, id_factory)
+        converters = {
+            "pi": CodexToPiConverter(codex, pi, dcp, id_factory),
+            "opencode": CodexToOpenCodeConverter(codex, opencode, id_factory),
+            "claude": CodexToClaudeConverter(codex, claude, id_factory),
+            "devin": CodexToDevinConverter(codex, devin, id_factory),
+            "factory": CodexToFactoryConverter(codex, factory, id_factory),
+            "windsurf": CodexToWindsurfConverter(codex, windsurf, id_factory),
+        }
 
         exported = 0
         skipped = 0
@@ -341,52 +355,26 @@ class CliApp:
             try:
                 results = []
                 for target in targets:
-                    if target == "pi":
-                        converter = pi_converter
-                        if args.on_conflict == "update":
-                            try:
-                                if not converter.has_changes(sid):
-                                    results.append("pi:skipped")
-                                    continue
-                            except Exception:
-                                pass
-                        plan = converter.plan(sid)
-                        if plan.destination.exists():
-                            action = self._resolve_conflict(args, converter, sid)
-                            if action == "skip":
-                                results.append("pi:skipped")
-                                continue
-                            elif action == "fork":
-                                new_id = str(uuid4())
-                                plan = converter.plan(sid, target_id=new_id)
+                    converter = converters[target]
+                    if args.on_conflict == "update":
                         try:
-                            converter.write(plan, overwrite=True)
-                        except FileExistsError:
-                            converter.write(plan, overwrite=True)
-                        results.append("pi:ok")
-                    elif target == "opencode":
-                        converter = opencode_converter
-                        if args.on_conflict == "update":
-                            try:
-                                if not converter.has_changes(sid):
-                                    results.append("opencode:skipped")
-                                    continue
-                            except Exception:
-                                pass
-                        plan = converter.plan(sid)
-                        if plan.destination.exists():
-                            action = self._resolve_conflict(args, converter, sid)
-                            if action == "skip":
-                                results.append("opencode:skipped")
+                            if not converter.has_changes(sid):
+                                results.append(f"{target}:skipped")
                                 continue
-                            elif action == "fork":
-                                new_id = str(uuid4())
-                                plan = converter.plan(sid, target_id=new_id)
-                        try:
-                            converter.write(plan, overwrite=True)
-                        except FileExistsError:
-                            converter.write(plan, overwrite=True)
-                        results.append("opencode:ok")
+                        except Exception:
+                            results.append(f"{target}:skipped")
+                            continue
+                    plan = converter.plan(sid)
+                    if plan.destination.exists():
+                        action = self._resolve_conflict(args, converter, sid)
+                        if action == "skip":
+                            results.append(f"{target}:skipped")
+                            continue
+                        if action == "fork":
+                            new_id = self._fork_target_id(target)
+                            plan = converter.plan(sid, target_id=new_id)
+                    converter.write(plan, overwrite=True)
+                    results.append(f"{target}:ok")
                 return sid, ",".join(results), ""
             except Exception as exc:
                 return sid, "failed", str(exc)
@@ -492,7 +480,7 @@ class CliApp:
             # Check if destination exists before forking
             plan = converter.plan(sid)
             if plan.destination.exists():
-                target_id = str(uuid4())
+                target_id = self._fork_target_id(self._target_provider(args.command))
                 plan = converter.plan(sid, target_id=target_id)
                 print(f"Forked to new session ID: {target_id}")
             self._print_plan(plan)
@@ -566,6 +554,16 @@ class CliApp:
             except Exception:
                 return "skip"
         return "skip"
+
+    @staticmethod
+    def _target_provider(command: str) -> str:
+        return command.rsplit("-to-", 1)[-1]
+
+    @staticmethod
+    def _fork_target_id(provider: str) -> str:
+        if provider == "opencode":
+            return opencode_id("ses", "")
+        return str(uuid4())
 
     @staticmethod
     def _print_summaries(summaries: list[SessionSummary]) -> None:

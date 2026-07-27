@@ -65,6 +65,17 @@ python session_convert.py list [codex|claude|opencode|all]
 
 默认直接安装到目标工具的会话目录；加 `-o <文件>` 则只输出到指定文件、不安装。
 
+四个方向都支持 `--on-conflict skip|update|overwrite|fork`：
+
+- `skip`（默认）：目标已经存在时不写文件、不改索引，也不创建副本。
+- `update`：独立脚本无法可靠证明目标侧没有续聊，因此目标存在时保守跳过；
+  主 `unisessions` CLI 会先做消息前缀校验，只更新未分叉的旧目标。
+- `overwrite`：原子替换同一个目标；请先确认目标侧没有需要保留的新对话。
+- `fork`：明确要求创建新会话 ID 时才生成副本。
+
+跨格式会话 ID 使用稳定映射，因此同一来源重复转换会命中同一个目标。自动化测试
+只使用临时目录，不应向真实 Claude、Codex 或 OpenCode 会话目录写入测试数据。
+
 ### codex2claude 选项
 
 | 选项 | 说明 |

@@ -30,6 +30,7 @@ Claude Code / Codex / OpenCode 会话转换脚本 (四方向)
 import argparse
 import base64
 import glob
+import hashlib
 import json
 import os
 import re
@@ -52,6 +53,7 @@ CLAUDE_PROJECTS_DIR = os.path.join(HOME, ".claude", "projects")
 CLAUDE_DESKTOP_DIR = os.path.join(
     os.environ.get("APPDATA", ""), "Claude", "claude-code-sessions")
 CLAUDE_VERSION = "2.1.219"  # 写入 claude 记录的 version 字段
+CONFLICT_MODES = ("skip", "overwrite", "fork", "update")
 
 # Codex 会把 AGENTS.md / 环境上下文等包装成 user 消息塞进对话,
 # 转换成 Claude 会话时默认跳过这些非人类输入
@@ -85,13 +87,118 @@ def read_jsonl(path):
     return records
 
 
-def write_jsonl(path, records):
+def _stable_hex(namespace, source_id, length=32):
+    return hashlib.sha256(
+        ("codex-session-bridge:%s:%s" % (namespace, source_id)).encode("utf-8")
+    ).hexdigest()[:length]
+
+
+def stable_codex_id(source_id):
+    try:
+        return str(uuid.UUID(source_id))
+    except (ValueError, AttributeError, TypeError):
+        return str(uuid.UUID(_stable_hex("codex", source_id), version=5))
+
+
+def stable_opencode_id(source_id):
+    if isinstance(source_id, str) and source_id.startswith("ses_"):
+        return source_id
+    return "ses_" + _stable_hex("opencode", source_id, 26)
+
+
+def _is_within(path, root):
+    try:
+        return os.path.commonpath(
+            (os.path.abspath(path), os.path.abspath(root))) == os.path.abspath(root)
+    except ValueError:
+        return False
+
+
+def _fork_output_path(path, target_id):
+    stem, suffix = os.path.splitext(path)
+    return "%s-%s%s" % (stem, target_id[:8], suffix)
+
+
+def _resolve_output_conflict(path, mode, fork_id_factory=None,
+                             fork_path_factory=None):
+    if not os.path.exists(path):
+        return path, None, False
+    if mode == "skip":
+        print("目标已存在, 已跳过: %s" % path)
+        return path, None, True
+    if mode == "overwrite":
+        return path, None, False
+    if mode == "update":
+        print("独立脚本无法证明目标没有续聊, 为安全起见已跳过: %s" % path)
+        print("如确认允许覆盖, 请显式使用 --on-conflict overwrite")
+        return path, None, True
+    if mode == "fork":
+        if fork_id_factory is None:
+            raise ValueError("fork 模式缺少目标 ID 生成器")
+        target_id = fork_id_factory()
+        fork_path = (fork_path_factory(target_id) if fork_path_factory
+                     else _fork_output_path(path, target_id))
+        while os.path.exists(fork_path):
+            target_id = fork_id_factory()
+            fork_path = (fork_path_factory(target_id) if fork_path_factory
+                         else _fork_output_path(path, target_id))
+        return fork_path, target_id, False
+    raise ValueError("未知冲突策略: %s" % mode)
+
+
+def write_jsonl(path, records, overwrite=False):
     parent = os.path.dirname(path)
     if parent:  # -o 传相对文件名时 dirname 为空, makedirs('') 会报错
         os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
+    if os.path.exists(path) and not overwrite:
+        raise FileExistsError("Refusing to overwrite existing file: %s" % path)
+    temp_path = path + ".session-convert.tmp"
+    with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
         for rec in records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    os.replace(temp_path, path)
+
+
+def write_json(path, value, overwrite=False):
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if os.path.exists(path) and not overwrite:
+        raise FileExistsError("Refusing to overwrite existing file: %s" % path)
+    temp_path = path + ".session-convert.tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(value, f, ensure_ascii=False, indent=2)
+    os.replace(temp_path, path)
+
+
+def upsert_codex_index(session_id, title):
+    updated = {"id": session_id, "thread_name": title, "updated_at": now_iso()}
+    lines = []
+    if os.path.exists(CODEX_INDEX_FILE):
+        with open(CODEX_INDEX_FILE, encoding="utf-8-sig") as f:
+            lines = f.readlines()
+    result_lines = []
+    replaced = False
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            entry = None
+        if isinstance(entry, dict) and entry.get("id") == session_id:
+            if not replaced:
+                result_lines.append(json.dumps(updated, ensure_ascii=False) + "\n")
+                replaced = True
+            continue
+        result_lines.append(line if line.endswith("\n") else line + "\n")
+    if not replaced:
+        result_lines.append(json.dumps(updated, ensure_ascii=False) + "\n")
+    parent = os.path.dirname(CODEX_INDEX_FILE)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    temp_path = CODEX_INDEX_FILE + ".session-convert.tmp"
+    with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
+        f.writelines(result_lines)
+    os.replace(temp_path, CODEX_INDEX_FILE)
 
 
 def now_iso():
@@ -145,7 +252,8 @@ def latest_file(pattern_dir, glob_pat):
 # ---------------------------------------------------------------------------
 
 def codex_to_claude(src, out_path=None, install=True, include_context=False,
-                    reasoning_mode="thinking", title=None, override_cwd=None):
+                    reasoning_mode="thinking", title=None, override_cwd=None,
+                    on_conflict="skip"):
     records = read_jsonl(src)
 
     meta = next((r["payload"] for r in records if r.get("type") == "session_meta"), {})
@@ -154,10 +262,21 @@ def codex_to_claude(src, out_path=None, install=True, include_context=False,
 
     project_dir = os.path.join(CLAUDE_PROJECTS_DIR, sanitize_project_dir(cwd))
     if install and out_path is None:
-        # 避免覆盖同 id 的已有 Claude 会话
-        if os.path.exists(os.path.join(project_dir, session_id + ".jsonl")):
-            session_id = str(uuid.uuid4())
         out_path = os.path.join(project_dir, session_id + ".jsonl")
+        out_path, fork_id, skipped = _resolve_output_conflict(
+            out_path, on_conflict, lambda: str(uuid.uuid4()),
+            lambda target_id: os.path.join(project_dir, target_id + ".jsonl"))
+        if skipped:
+            return out_path
+        if fork_id:
+            session_id = fork_id
+    elif out_path is not None:
+        out_path, fork_id, skipped = _resolve_output_conflict(
+            out_path, on_conflict, lambda: str(uuid.uuid4()))
+        if skipped:
+            return out_path
+        if fork_id:
+            session_id = fork_id
 
     out = []
     parent_uuid = None
@@ -303,14 +422,14 @@ def codex_to_claude(src, out_path=None, install=True, include_context=False,
 
     if out_path is None:
         out_path = os.path.splitext(src)[0] + ".claude.jsonl"
-    write_jsonl(out_path, out)
+    write_jsonl(out_path, out, overwrite=on_conflict == "overwrite")
 
     n_user = sum(1 for r in out if r["type"] == "user" and isinstance(r["message"]["content"], str))
     print("Codex -> Claude 转换完成")
     print("  来源: %s" % src)
     print("  输出: %s" % out_path)
     print("  记录: %d 条 (人类消息 %d 条), cwd=%s" % (len(out), n_user, cwd))
-    if install and out_path.startswith(CLAUDE_PROJECTS_DIR):
+    if install and _is_within(out_path, CLAUDE_PROJECTS_DIR):
         print("  已安装到 Claude 项目目录, 在 %s 下运行 claude 后可在历史会话中恢复" % cwd)
         reg_title = title or (first_user_text or "imported from codex"
                               ).strip().splitlines()[0][:60]
@@ -462,7 +581,7 @@ def register_codex_thread(session_id, title, cwd, rollout_path, preview, start_t
         return False
 
 
-def claude_to_codex(src, out_path=None, install=True):
+def claude_to_codex(src, out_path=None, install=True, on_conflict="skip"):
     records = read_jsonl(src)
 
     conv = [r for r in records if r.get("type") in ("user", "assistant")
@@ -474,6 +593,33 @@ def claude_to_codex(src, out_path=None, install=True):
     cwd = first.get("cwd", os.getcwd())
     session_id = first.get("sessionId") or str(uuid.uuid4())
     start_ts = first.get("timestamp") or now_iso()
+
+    if install and out_path is None:
+        try:
+            dt = datetime.fromisoformat(start_ts.replace("Z", "+00:00"))
+        except ValueError:
+            dt = datetime.now(timezone.utc)
+        day_dir = os.path.join(CODEX_SESSIONS_DIR, dt.strftime("%Y"),
+                               dt.strftime("%m"), dt.strftime("%d"))
+        out_path = os.path.join(
+            day_dir, "rollout-%s-%s.jsonl" % (
+                dt.strftime("%Y-%m-%dT%H-%M-%S"), session_id))
+        out_path, fork_id, skipped = _resolve_output_conflict(
+            out_path, on_conflict, lambda: str(uuid.uuid4()),
+            lambda target_id: os.path.join(
+                day_dir, "rollout-%s-%s.jsonl" % (
+                    dt.strftime("%Y-%m-%dT%H-%M-%S"), target_id)))
+        if skipped:
+            return out_path
+        if fork_id:
+            session_id = fork_id
+    elif out_path is not None:
+        out_path, fork_id, skipped = _resolve_output_conflict(
+            out_path, on_conflict, lambda: str(uuid.uuid4()))
+        if skipped:
+            return out_path
+        if fork_id:
+            session_id = fork_id
 
     out = []
     first_user_text = None
@@ -609,35 +755,16 @@ def claude_to_codex(src, out_path=None, install=True):
                         "call_id": block.get("id", ""),
                     })
 
-    if install and out_path is None:
-        try:
-            dt = datetime.fromisoformat(start_ts.replace("Z", "+00:00"))
-        except ValueError:
-            dt = datetime.now(timezone.utc)
-        day_dir = os.path.join(CODEX_SESSIONS_DIR, dt.strftime("%Y"),
-                               dt.strftime("%m"), dt.strftime("%d"))
-        fname = "rollout-%s-%s.jsonl" % (dt.strftime("%Y-%m-%dT%H-%M-%S"), session_id)
-        out_path = os.path.join(day_dir, fname)
-        if os.path.exists(out_path):
-            session_id = str(uuid.uuid4())
-            out[0]["payload"]["session_id"] = session_id
-            out[0]["payload"]["id"] = session_id
-            out_path = os.path.join(
-                day_dir, "rollout-%s-%s.jsonl" % (dt.strftime("%Y-%m-%dT%H-%M-%S"),
-                                                  session_id))
     if out_path is None:
         out_path = os.path.splitext(src)[0] + ".codex.jsonl"
-    write_jsonl(out_path, out)
+    write_jsonl(out_path, out, overwrite=on_conflict == "overwrite")
 
     # 追加到 codex 会话索引 + 注册桌面端状态数据库, 让它出现在历史列表里
     registered = False
-    if install and out_path.startswith(CODEX_SESSIONS_DIR):
+    if install and _is_within(out_path, CODEX_SESSIONS_DIR):
         title = (first_user_text or "imported from claude").strip()
         title = title.splitlines()[0][:60]
-        entry = {"id": session_id, "thread_name": title,
-                 "updated_at": now_iso()}
-        with open(CODEX_INDEX_FILE, "a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        upsert_codex_index(session_id, title)
         preview = (first_user_text or title).strip()
         registered = register_codex_thread(
             session_id, title, cwd, out_path, preview, start_ts)
@@ -647,7 +774,7 @@ def claude_to_codex(src, out_path=None, install=True):
     print("  输出: %s" % out_path)
     print("  记录: %d 条%s, cwd=%s" % (
         len(out), ", 图片 %d 张" % n_images if n_images else "", cwd))
-    if install and out_path.startswith(CODEX_SESSIONS_DIR):
+    if install and _is_within(out_path, CODEX_SESSIONS_DIR):
         print("  已安装到 Codex 会话目录并写入索引%s"
               % (", 已注册桌面端数据库" if registered else ""))
     return out_path
@@ -743,7 +870,8 @@ def load_opencode_conversation(db, session_id):
     return meta, conv
 
 
-def opencode_to_codex(session_id=None, out_path=None, install=True, db=None):
+def opencode_to_codex(session_id=None, out_path=None, install=True, db=None,
+                      on_conflict="skip"):
     db = db or find_opencode_db()
     if not db:
         sys.exit("找不到 OpenCode 数据库 (尝试过: %s)" % "; ".join(OPENCODE_DB_CANDIDATES))
@@ -758,7 +886,7 @@ def opencode_to_codex(session_id=None, out_path=None, install=True, db=None):
         sys.exit("没有可转换的对话内容: %s" % session_id)
 
     cwd = meta["directory"]
-    new_id = str(uuid.uuid4())
+    new_id = stable_codex_id(session_id)
     start_ms = meta["time_created"] or int(
         datetime.now(timezone.utc).timestamp() * 1000)
     start_dt = datetime.fromtimestamp(start_ms / 1000, timezone.utc)
@@ -796,18 +924,35 @@ def opencode_to_codex(session_id=None, out_path=None, install=True, db=None):
                                start_dt.strftime("%m"), start_dt.strftime("%d"))
         out_path = os.path.join(day_dir, "rollout-%s-%s.jsonl" % (
             start_dt.strftime("%Y-%m-%dT%H-%M-%S"), new_id))
+        out_path, fork_id, skipped = _resolve_output_conflict(
+            out_path, on_conflict, lambda: str(uuid.uuid4()),
+            lambda target_id: os.path.join(
+                day_dir, "rollout-%s-%s.jsonl" % (
+                    start_dt.strftime("%Y-%m-%dT%H-%M-%S"), target_id)))
+        if skipped:
+            return out_path
+        if fork_id:
+            new_id = fork_id
+            out[0]["payload"]["session_id"] = new_id
+            out[0]["payload"]["id"] = new_id
     if out_path is None:
         out_path = session_id + ".codex.jsonl"
-    write_jsonl(out_path, out)
+    elif not install:
+        out_path, fork_id, skipped = _resolve_output_conflict(
+            out_path, on_conflict, lambda: str(uuid.uuid4()))
+        if skipped:
+            return out_path
+        if fork_id:
+            new_id = fork_id
+            out[0]["payload"]["session_id"] = new_id
+            out[0]["payload"]["id"] = new_id
+    write_jsonl(out_path, out, overwrite=on_conflict == "overwrite")
 
     registered = False
-    if install and out_path.startswith(CODEX_SESSIONS_DIR):
+    if install and _is_within(out_path, CODEX_SESSIONS_DIR):
         title = (meta["title"] or first_user_text or "imported from opencode"
                  ).strip().splitlines()[0][:60]
-        with open(CODEX_INDEX_FILE, "a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps({"id": new_id, "thread_name": title,
-                                "updated_at": now_iso()},
-                               ensure_ascii=False) + "\n")
+        upsert_codex_index(new_id, title)
         preview = (first_user_text or title).strip()
         registered = register_codex_thread(new_id, title, cwd, out_path,
                                            preview, start_ts)
@@ -816,13 +961,13 @@ def opencode_to_codex(session_id=None, out_path=None, install=True, db=None):
     print("  来源: %s (%s)" % (session_id, db))
     print("  输出: %s" % out_path)
     print("  记录: %d 条, cwd=%s" % (len(out), cwd))
-    if install and out_path.startswith(CODEX_SESSIONS_DIR):
+    if install and _is_within(out_path, CODEX_SESSIONS_DIR):
         print("  已安装到 Codex 会话目录并写入索引%s"
               % (", 已注册桌面端数据库" if registered else ""))
     return out_path
 
 
-def codex_to_opencode(src, out_path=None):
+def codex_to_opencode(src, out_path=None, on_conflict="skip"):
     """Codex rollout -> OpenCode 导出 JSON (需手动 `opencode import` 导入)"""
     records = read_jsonl(src)
     meta = next((r["payload"] for r in records
@@ -861,7 +1006,7 @@ def codex_to_opencode(src, out_path=None):
         except ValueError:
             return int(datetime.now(timezone.utc).timestamp() * 1000)
 
-    new_id = "ses_" + uuid.uuid4().hex[:26]
+    new_id = stable_opencode_id(src_id)
     first_user = next((t for r, t, _ in conv if r == "user"), "imported")
     title = first_user.strip().splitlines()[0][:80]
     created = to_ms(conv[0][2])
@@ -900,11 +1045,20 @@ def codex_to_opencode(src, out_path=None):
 
     if out_path is None:
         out_path = "%s.opencode.json" % src_id[:8]
-    parent = os.path.dirname(out_path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(export, f, ensure_ascii=False, indent=2)
+    out_path, fork_id, skipped = _resolve_output_conflict(
+        out_path, on_conflict,
+        lambda: "ses_" + uuid.uuid4().hex[:26],
+        lambda target_id: _fork_output_path(out_path, target_id[4:]))
+    if skipped:
+        return out_path
+    if fork_id:
+        new_id = fork_id
+        export["info"]["id"] = new_id
+        for message in export["messages"]:
+            message["info"]["sessionID"] = new_id
+            for part in message["parts"]:
+                part["sessionID"] = new_id
+    write_json(out_path, export, overwrite=on_conflict == "overwrite")
 
     print("Codex -> OpenCode 转换完成")
     print("  来源: %s" % src)
@@ -1134,23 +1288,31 @@ def main():
                     default="thinking", help="推理摘要的转换方式 (默认 thinking)")
     p1.add_argument("--title", help="设置 Claude 会话标题 (默认无)")
     p1.add_argument("--claude-cwd", help="覆盖会话 cwd, 决定装到哪个 Claude 项目目录")
+    p1.add_argument("--on-conflict", choices=CONFLICT_MODES, default="skip",
+                    help="目标已存在时: skip(默认), update, overwrite 或 fork")
 
     p2 = sub.add_parser("claude2codex", help="Claude 会话 -> Codex rollout")
     p2.add_argument("input", nargs="?", help="Claude 会话 .jsonl 文件路径")
     p2.add_argument("--latest", action="store_true", help="使用最新的 Claude 会话")
     p2.add_argument("-o", "--output", help="只输出到该文件, 不安装到 Codex 目录")
+    p2.add_argument("--on-conflict", choices=CONFLICT_MODES, default="skip",
+                    help="目标已存在时: skip(默认), update, overwrite 或 fork")
 
     p3 = sub.add_parser("opencode2codex", help="OpenCode 会话 -> Codex rollout")
     p3.add_argument("input", nargs="?", help="OpenCode 会话 id (ses_...)")
     p3.add_argument("--latest", action="store_true", help="使用最新的 OpenCode 会话")
     p3.add_argument("-o", "--output", help="只输出到该文件, 不安装到 Codex 目录")
     p3.add_argument("--db", help="OpenCode 数据库路径 (默认自动探测)")
+    p3.add_argument("--on-conflict", choices=CONFLICT_MODES, default="skip",
+                    help="目标已存在时: skip(默认), update, overwrite 或 fork")
 
     p4 = sub.add_parser("codex2opencode",
                         help="Codex rollout -> OpenCode 导出 JSON (之后 opencode import)")
     p4.add_argument("input", nargs="?", help="Codex rollout-*.jsonl 文件路径")
     p4.add_argument("--latest", action="store_true", help="使用最新的 Codex 会话")
     p4.add_argument("-o", "--output", help="导出 JSON 输出路径")
+    p4.add_argument("--on-conflict", choices=CONFLICT_MODES, default="skip",
+                    help="输出已存在时: skip(默认), update, overwrite 或 fork")
 
     p5 = sub.add_parser("list", help="列出可转换的会话")
     p5.add_argument("which", nargs="?",
@@ -1167,7 +1329,8 @@ def main():
         # OpenCode 会话在数据库里, 不走文件路径逻辑
         opencode_to_codex(None if args.latest else args.input,
                           out_path=args.output,
-                          install=args.output is None, db=args.db)
+                          install=args.output is None, db=args.db,
+                          on_conflict=args.on_conflict)
         return
 
     if args.latest:
@@ -1190,11 +1353,14 @@ def main():
         codex_to_claude(src, out_path=args.output, install=install,
                         include_context=args.include_context,
                         reasoning_mode=args.reasoning, title=args.title,
-                        override_cwd=args.claude_cwd)
+                        override_cwd=args.claude_cwd,
+                        on_conflict=args.on_conflict)
     elif args.cmd == "codex2opencode":
-        codex_to_opencode(src, out_path=args.output)
+        codex_to_opencode(src, out_path=args.output,
+                          on_conflict=args.on_conflict)
     else:
-        claude_to_codex(src, out_path=args.output, install=install)
+        claude_to_codex(src, out_path=args.output, install=install,
+                        on_conflict=args.on_conflict)
 
 
 if __name__ == "__main__":
