@@ -236,9 +236,12 @@ class ConversionTests(unittest.TestCase):
             ).plan(session_id)
 
             self.assertIn("rollout-2026-06-28T04-20-31-629", plan.destination.name)
-            self.assertEqual(len(plan.records), 2)
+            self.assertEqual(len(plan.records), 3)
             self.assertEqual(plan.records[0]["type"], "session_meta")
-            self.assertEqual(plan.records[1]["type"], "response_item")
+            self.assertEqual(plan.records[1]["type"], "event_msg")
+            self.assertEqual(plan.records[1]["payload"]["type"], "agent_message")  # type: ignore[index]
+            self.assertEqual(plan.records[1]["payload"]["phase"], "final_answer")  # type: ignore[index]
+            self.assertEqual(plan.records[2]["type"], "response_item")
 
     def test_codex_to_opencode_plan_uses_export_shape(self) -> None:
         with tempfile.TemporaryDirectory() as root_name:
@@ -293,7 +296,8 @@ class ConversionTests(unittest.TestCase):
 
             self.assertIn("rollout-2026-06-27", plan.destination.name)
             self.assertEqual(plan.records[0]["type"], "session_meta")
-            self.assertEqual(plan.records[1]["payload"]["role"], "user")  # type: ignore[index]
+            self.assertEqual(plan.records[1]["payload"]["type"], "user_message")  # type: ignore[index]
+            self.assertEqual(plan.records[2]["payload"]["role"], "user")  # type: ignore[index]
 
     def test_opencode_to_pi_plan_writes_dcp_service(self) -> None:
         with tempfile.TemporaryDirectory() as root_name:
@@ -546,6 +550,18 @@ class CompactionTests(unittest.TestCase):
             compacted = [r for r in records if r.get("type") == "compacted"]
             self.assertEqual(len(compacted), 1)
             self.assertEqual(compacted[0]["payload"]["message"], "Compaction summary text")
+
+            visible_events = [
+                r["payload"] for r in records
+                if r.get("type") == "event_msg"
+                and r["payload"].get("type") in {"user_message", "agent_message"}
+            ]
+            self.assertEqual(
+                [event["type"] for event in visible_events],
+                ["user_message", "user_message", "agent_message", "user_message"],
+            )
+            assistant_events = [event for event in visible_events if event["type"] == "agent_message"]
+            self.assertTrue(all(event["phase"] == "final_answer" for event in assistant_events))
 
     def test_pi_to_codex_compaction_emitted(self) -> None:
         with tempfile.TemporaryDirectory() as root_name:
