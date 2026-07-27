@@ -406,6 +406,23 @@ class ConvertScriptTests(unittest.TestCase):
             ]
             self.assertEqual(agent_events[0]["phase"], "final_answer")
 
+    def test_claude_summary_distinguishes_same_title_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "abcdef12-session.jsonl"
+            records = [
+                _claude_record("user", "same title"),
+                _claude_record("assistant", [{"type": "text", "text": "working"}]),
+                _claude_record("user", "<task-notification>internal</task-notification>"),
+                _claude_record("user", [{"type": "tool_result", "content": "ignored"}]),
+                _claude_record("assistant", [{"type": "text", "text": "distinct final state"}]),
+            ]
+            path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+            self.assertEqual(
+                self.script._claude_summary(path),
+                ("same title", "distinct final state", 3),
+            )
+
     def test_register_codex_thread_inserts_and_updates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

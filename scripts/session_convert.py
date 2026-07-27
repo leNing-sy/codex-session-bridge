@@ -1114,26 +1114,46 @@ def _codex_titles():
     return titles
 
 
-def _claude_preview(path, limit=200):
-    """取 Claude 会话里第一条人类消息作预览"""
+def _claude_summary(path):
+    """返回 Claude 会话的首条用户消息、末条可见消息和消息数。"""
+    first_user = ""
+    last_visible = ""
+    message_count = 0
     try:
         with open(path, encoding="utf-8") as f:
-            for i, line in enumerate(f):
-                if i >= limit:
-                    break
+            for line in f:
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if rec.get("type") != "user":
+                if rec.get("type") not in ("user", "assistant") \
+                        or rec.get("isSidechain") or rec.get("isMeta"):
                     continue
                 content = rec.get("message", {}).get("content")
-                if isinstance(content, str) and content.strip() \
-                        and not content.lstrip().startswith(CLAUDE_NOISE_PREFIXES):
-                    return content.strip().splitlines()[0]
+                if isinstance(content, str):
+                    text = content.strip()
+                elif isinstance(content, list):
+                    text = "\n".join(
+                        block.get("text", "").strip()
+                        for block in content
+                        if isinstance(block, dict) and block.get("type") == "text"
+                        and block.get("text", "").strip())
+                else:
+                    text = ""
+                if not text or text.lstrip().startswith(CLAUDE_NOISE_PREFIXES):
+                    continue
+                message_count += 1
+                last_visible = text.splitlines()[0]
+                if rec.get("type") == "user" and not first_user:
+                    first_user = last_visible
     except OSError:
         pass
-    return ""
+    return first_user, last_visible, message_count
+
+
+def _claude_preview(path):
+    """向后兼容：取 Claude 会话里第一条人类消息作预览。"""
+    return _claude_summary(path)[0]
 
 
 def _pick(prompt, count):
@@ -1207,10 +1227,16 @@ def interactive_main():
         print()
         infos = []
         for i, f in enumerate(files):
-            preview = _claude_preview(f) or "(无用户消息)"
+            preview, last_message, message_count = _claude_summary(f)
+            preview = preview or "(无用户消息)"
+            last_message = last_message or preview
+            short_id = os.path.splitext(os.path.basename(f))[0][:8]
             mtime = datetime.fromtimestamp(os.path.getmtime(f)).strftime("%m-%d %H:%M")
             infos.append(f)
-            print("  %2d. [%s] %s" % (i + 1, mtime, preview[:40]))
+            print("  %2d. [%s] %s  [%s, %d条]" % (
+                i + 1, mtime, preview[:40], short_id, message_count))
+            if last_message != preview:
+                print("      最后: %s" % last_message[:68])
         print()
         n = _pick("选择要转换的会话 [1-%d]: " % len(infos), len(infos))
         if n is None:
