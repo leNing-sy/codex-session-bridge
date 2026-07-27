@@ -537,8 +537,8 @@ def register_codex_thread(session_id, title, cwd, rollout_path, preview, start_t
                 "rollout_path": _win_extended(rollout_path),
                 "created_at": created_ms // 1000,
                 "updated_at": now_s,
-                "source": tmpl.get("source") or "cli",
-                "model_provider": tmpl.get("model_provider") or "anthropic",
+                "source": "vscode",
+                "model_provider": "custom",
                 "cwd": _win_extended(cwd),
                 "title": title,
                 "sandbox_policy": tmpl.get("sandbox_policy") or '{"type":"read-only"}',
@@ -546,7 +546,7 @@ def register_codex_thread(session_id, title, cwd, rollout_path, preview, start_t
                 "tokens_used": 0,
                 "has_user_event": 1,
                 "archived": 0,
-                "cli_version": "session-convert",
+                "cli_version": tmpl.get("cli_version") or "session-convert",
                 "first_user_message": preview,
                 "memory_mode": tmpl.get("memory_mode") or "enabled",
                 "model": tmpl.get("model"),
@@ -646,9 +646,10 @@ def claude_to_codex(src, out_path=None, install=True, on_conflict="skip"):
     # 会话头
     wrap(start_ts, "session_meta", {
         "session_id": session_id, "id": session_id, "timestamp": start_ts,
-        "cwd": cwd, "originator": "session_convert",
-        "cli_version": "converted-from-claude", "source": "import",
-        "thread_source": "user", "model_provider": "anthropic",
+        "cwd": cwd, "originator": "codex_work_desktop",
+        "cli_version": "converted-from-claude", "source": "vscode",
+        "thread_source": "user", "model_provider": "custom",
+        "history_mode": "legacy",
     })
 
     for rec in conv:
@@ -679,19 +680,7 @@ def claude_to_codex(src, out_path=None, install=True, on_conflict="skip"):
                     if not isinstance(block, dict):
                         continue
                     bt = block.get("type")
-                    if bt == "tool_result":
-                        result = block.get("content", "")
-                        if isinstance(result, list):
-                            result = "".join(
-                                b.get("text", "") for b in result
-                                if isinstance(b, dict))
-                        wrap(ts, "response_item", {
-                            "type": "function_call_output",
-                            "id": "fco_" + uuid.uuid4().hex[:24],
-                            "call_id": block.get("tool_use_id", ""),
-                            "output": [{"type": "input_text", "text": str(result)}],
-                        })
-                    elif bt == "text" and block.get("text", "").strip():
+                    if bt == "text" and block.get("text", "").strip():
                         texts.append(block["text"])
                     elif bt == "image" and isinstance(block.get("source"), dict) \
                             and block["source"].get("type") == "base64":
@@ -739,22 +728,8 @@ def claude_to_codex(src, out_path=None, install=True, on_conflict="skip"):
                                      "text": block["text"]}],
                         "phase": "final_answer",
                     })
-                elif bt == "thinking" and block.get("thinking", "").strip():
-                    wrap(ts, "response_item", {
-                        "type": "reasoning",
-                        "id": "rs_" + uuid.uuid4().hex[:24],
-                        "summary": [{"type": "summary_text",
-                                     "text": block["thinking"]}],
-                    })
-                elif bt == "tool_use":
-                    wrap(ts, "response_item", {
-                        "type": "function_call",
-                        "id": "fc_" + uuid.uuid4().hex[:24],
-                        "name": block.get("name", "tool"),
-                        "arguments": json.dumps(block.get("input", {}),
-                                                ensure_ascii=False),
-                        "call_id": block.get("id", ""),
-                    })
+                # Claude tool calls, tool results, and hidden thinking are tied
+                # to Claude's runtime and are unsafe to replay as Codex history.
 
     if out_path is None:
         out_path = os.path.splitext(src)[0] + ".codex.jsonl"
@@ -895,9 +870,10 @@ def opencode_to_codex(session_id=None, out_path=None, install=True, db=None,
 
     out = [{"timestamp": start_ts, "type": "session_meta", "payload": {
         "session_id": new_id, "id": new_id, "timestamp": start_ts,
-        "cwd": cwd, "originator": "session_convert",
-        "cli_version": "converted-from-opencode", "source": "import",
+        "cwd": cwd, "originator": "codex_work_desktop",
+        "cli_version": "converted-from-opencode", "source": "vscode",
         "thread_source": "user", "model_provider": "custom",
+        "history_mode": "legacy",
     }}]
     first_user_text = None
     for role, text, ts in conv:

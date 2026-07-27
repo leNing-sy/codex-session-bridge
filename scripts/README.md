@@ -91,7 +91,9 @@ python session_convert.py list [codex|claude|opencode|all]
   `<in-app-browser-context>`、AGENTS.md 等），这些在 Codex 界面里不显示，
   转过去会被当成正文渲染；并对恢复会话导致的重复用户输入去重（比较时忽略首尾空白）。
 - claude2codex：跳过 Claude 记录的斜杠命令（`<command-name>` 等）、本地命令输出
-  （`<local-command-stdout>`）、`<system-reminder>` 和"[Request interrupted]"等标记。
+  （`<local-command-stdout>`）、`<system-reminder>` 和"[Request interrupted]"等标记；
+  同时不导入 Claude 的隐藏 thinking、tool_use 和 tool_result，避免来源端内部执行链
+  被 Codex 当作 Responses 历史重放，造成超大请求或续聊失败。
 
 ## 转换后如何打开
 
@@ -125,6 +127,7 @@ python session_convert.py list [codex|claude|opencode|all]
 ## 已知限制
 
 - Codex 的推理摘要转成 Claude thinking 块时没有签名，继续对话时模型可能忽略这部分（不影响正文和工具记录的理解）。
-- Claude 的 sidechain（子代理）记录不转换。
+- Claude 的 sidechain（子代理）、隐藏 thinking 和工具执行记录不转换；可见用户输入与
+  助手最终回复会保留。
 - 图片消息双向转换（base64 直通；转进 Codex 时同时落盘到
   `~/.codex/bridge-images/<会话id>/` 供界面显示）；音频等其他多媒体不转换。

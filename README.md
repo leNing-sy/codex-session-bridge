@@ -30,10 +30,11 @@
 - 预览支持 Claude Code JSONL 会话，复用同一套 Codex 安装、备份和验证流程。
 - 修复共享提取层的四类泄漏：Claude 子代理/isMeta/斜杠命令噪声混入、Codex 隐藏
   上下文标记漏匹配、恢复会话重复输入、增量导出的路径计算错误（均有回归测试）。
+- Claude Code / OpenCode 导入 Codex 时只保留可见对话，不重放来源端的内部推理和工具链；
+  导入任务使用 Codex 桌面可识别的来源注册，重启后仍可见、可继续聊天。
 
 下一阶段：
 
-- 使用真实 Claude Code 会话完成桌面端续聊验证。
 - 批量导入、筛选和冲突处理。
 - Codex 版本兼容检测。
 - 更完整的附件和工具摘要保留。
@@ -113,14 +114,16 @@ python -m venv .venv
 
 - 覆盖四个方向：Codex <-> Claude 双向、OpenCode -> Codex（直读活库）、
   Codex -> OpenCode（导出文件 + `opencode import`）；
-- 保留工具调用、工具结果和推理摘要（转成 thinking 块），不只是纯文本回合；
+- Codex -> Claude 可按选项转换推理摘要和工具记录；Claude Code / OpenCode -> Codex
+  只导入可见用户与助手消息，避免来源端内部工具链导致 Codex 续聊失败；
 - 双向清理注入消息：Codex 侧过滤 AGENTS.md、`<environment_context>`、
   `<in-app-browser-context>` 等隐藏上下文并对恢复会话产生的重复输入去重，
   Claude 侧过滤斜杠命令、本地命令输出、`<system-reminder>` 等记录；
 - 图片消息双向转换（base64 直通，转进 Codex 时同时落盘供界面显示）；
 - 两端桌面应用自动注册：claude2codex 写 Codex 的 `state_5.sqlite` threads 表，
   codex2claude 写 Claude 桌面端的会话注册目录（重启应用后可见）；
-- 转换结果已在 Claude Code 真实续聊场景验证。
+- Claude Code -> Codex 已使用真实历史会话完成桌面端续聊验证；OpenCode -> Codex
+  已完成实际转换与续聊验证。Codex -> Claude 暂由自动测试覆盖，仍建议保留源会话再试用。
 
 **交互模式**：不带参数运行进入菜单——选方向、从最近会话列表（带标题和时间）
 选一个，自动转换并安装。可用 PyInstaller 打成免安装的单文件 exe，双击即用：

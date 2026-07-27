@@ -373,7 +373,7 @@ class ConvertScriptTests(unittest.TestCase):
             kinds = [r["message"]["content"][0]["type"] for r in converted if r["type"] == "assistant"]
             self.assertEqual(kinds, ["thinking", "text"])
 
-    def test_claude2codex_pairs_tools_and_drops_noise(self) -> None:
+    def test_claude2codex_drops_runtime_internals_and_noise(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "claude.jsonl"
             out = Path(tmp) / "out.jsonl"
@@ -392,12 +392,8 @@ class ConvertScriptTests(unittest.TestCase):
             items = [r["payload"] for r in converted if r["type"] == "response_item"]
             user_texts = [p["content"][0]["text"] for p in items if p["type"] == "message" and p["role"] == "user"]
             self.assertEqual(user_texts, ["run the tests"])
-            calls = [p for p in items if p["type"] == "function_call"]
-            outputs = [p for p in items if p["type"] == "function_call_output"]
-            self.assertEqual(len(calls), 1)
-            self.assertEqual(len(outputs), 1)
-            self.assertEqual(calls[0]["call_id"], outputs[0]["call_id"])
-            self.assertEqual([p["type"] for p in items if p["type"] == "reasoning"], ["reasoning"])
+            internal_types = {"function_call", "function_call_output", "reasoning"}
+            self.assertFalse(any(p["type"] in internal_types for p in items))
             assistant_items = [p for p in items if p.get("role") == "assistant"]
             self.assertEqual(assistant_items[0]["phase"], "final_answer")
             agent_events = [
@@ -405,6 +401,11 @@ class ConvertScriptTests(unittest.TestCase):
                 if r["type"] == "event_msg" and r["payload"].get("type") == "agent_message"
             ]
             self.assertEqual(agent_events[0]["phase"], "final_answer")
+            meta = next(r["payload"] for r in converted if r["type"] == "session_meta")
+            self.assertEqual(meta["model_provider"], "custom")
+            self.assertEqual(meta["history_mode"], "legacy")
+            self.assertEqual(meta["source"], "vscode")
+            self.assertEqual(meta["originator"], "codex_work_desktop")
 
     def test_claude_summary_distinguishes_same_title_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -461,10 +462,12 @@ class ConvertScriptTests(unittest.TestCase):
                 self.script.HOME = original_home
             connection = sqlite3.connect(db)
             try:
-                rows = connection.execute("SELECT id, title, has_user_event FROM threads").fetchall()
+                rows = connection.execute(
+                    "SELECT id, title, has_user_event, source, model_provider FROM threads"
+                ).fetchall()
             finally:
                 connection.close()
-            self.assertEqual(rows, [("sess-1", "New title", 1)])
+            self.assertEqual(rows, [("sess-1", "New title", 1, "vscode", "custom")])
 
     # 1x1 红色 PNG (无第三方依赖)
     _PNG_B64 = (
@@ -877,6 +880,10 @@ class ConvertScriptTests(unittest.TestCase):
             meta = converted[0]
             self.assertEqual(meta["type"], "session_meta")
             self.assertEqual(meta["payload"]["cwd"], "C:/projects/demo")
+            self.assertEqual(meta["payload"]["source"], "vscode")
+            self.assertEqual(meta["payload"]["originator"], "codex_work_desktop")
+            self.assertEqual(meta["payload"]["model_provider"], "custom")
+            self.assertEqual(meta["payload"]["history_mode"], "legacy")
             items = [r["payload"] for r in converted if r["type"] == "response_item"]
             self.assertEqual(
                 [(p["role"], p["content"][0]["text"]) for p in items],
