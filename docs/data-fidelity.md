@@ -1,6 +1,6 @@
 # Data Fidelity
 
-UniSessions performs **text-history conversions**, not full behavioral state replay. This page documents exactly what is preserved and what is not when converting sessions between tools.
+Codex Session Bridge performs **text-history conversions**, not full behavioral state replay. This page documents exactly what is preserved and what is not when converting sessions between tools.
 
 ## What Is Preserved
 

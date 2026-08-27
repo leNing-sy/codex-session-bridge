@@ -1,8 +1,8 @@
-site_name: UniSessions
-site_description: Convert AI coding CLI sessions between Codex, Claude Code, Pi, OpenCode, Devin, and Factory. SDK, CLI, MCP chat recall, and trace export.
-site_url: https://vibheksoni.github.io/session-export/
-repo_url: https://github.com/vibheksoni/session-export
-repo_name: vibheksoni/session-export
+site_name: Codex Session Bridge
+site_description: Migrate local AI coding sessions between Codex, Claude Code, and OpenCode. Includes the inherited UniSessions SDK, CLI, MCP chat recall, and trace export.
+site_url: https://leNing-sy.github.io/codex-session-bridge/
+repo_url: https://github.com/leNing-sy/codex-session-bridge
+repo_name: leNing-sy/codex-session-bridge
 edit_uri: edit/main/docs/
 
 docs_dir: docs
@@ -42,7 +42,6 @@ theme:
     - toc.follow
   icon:
     repo: fontawesome/brands/github
-  favicon: assets/favicon.png
 
 nav:
   - Home: index.md
@@ -87,17 +86,14 @@ markdown_extensions:
 extra:
   social:
     - icon: fontawesome/brands/github
+      link: https://github.com/leNing-sy/codex-session-bridge
+    - icon: material/source-branch
       link: https://github.com/vibheksoni/session-export
-    - icon: fontawesome/brands/python
-      link: https://pypi.org/project/unisessions/
-    - icon: fontawesome/brands/x-twitter
-      link: https://x.com/ImVibhek
-    - icon: material/web
-      link: https://vibheksoni.com
+      name: Upstream project (vibheksoni/session-export)
   generator: false
 
 plugins:
   - search
   - tags
 
-copyright: Copyright &copy; 2026 Vibhek Soni — MIT License
+copyright: Copyright &copy; 2026 Vibhek Soni (upstream) and contributors — MIT License

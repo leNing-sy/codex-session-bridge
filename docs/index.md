@@ -4,113 +4,108 @@ hide:
   - toc
 ---
 
-# UniSessions
+# Codex Session Bridge
 
-Convert AI coding CLI sessions between **Codex**, **Claude Code**, **Pi**,
-**OpenCode**, **Devin**, **Factory**, and **Windsurf Cascade**. SDK, CLI, MCP chat recall, and
-trace export for fine-tuning.
+Migrate local session history between **Codex**, **Claude Code**, and
+**OpenCode** so a converted session appears in the target tool's history list
+and keeps enough visible context to continue the conversation.
 
-[![PyPI](https://img.shields.io/pypi/v/unisessions?logo=pypi&logoColor=white)](https://pypi.org/project/unisessions/)
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-yellow)]()
-[![GitHub stars](https://img.shields.io/github/stars/vibheksoni/session-export?style=social)](https://github.com/vibheksoni/session-export/stargazers)
+[![Release](https://img.shields.io/github/v/release/leNing-sy/codex-session-bridge?label=release)](https://github.com/leNing-sy/codex-session-bridge/releases/latest)
+[![Windows Build](https://github.com/leNing-sy/codex-session-bridge/actions/workflows/build-exe.yml/badge.svg)](https://github.com/leNing-sy/codex-session-bridge/actions/workflows/build-exe.yml)
+[![License](https://img.shields.io/github/license/leNing-sy/codex-session-bridge)](https://github.com/leNing-sy/codex-session-bridge/blob/main/LICENSE)
 
 [:material-download: Install](installation.md){ .md-button .md-button--primary }
 [:material-rocket-launch: Quick Start](quickstart.md){ .md-button }
-[:material-github: GitHub](https://github.com/vibheksoni/session-export){ .md-button }
+[:material-github: GitHub](https://github.com/leNing-sy/codex-session-bridge){ .md-button }
 
 ---
 
-## Why I built this
+!!! danger "Back up important sessions before converting"
+    These tools write into the session directories and desktop state databases
+    of live applications. Keep the source session files at minimum, and back up
+    the target session directory and state database when you first use a
+    direction, right after a client upgrade, or before using `overwrite`.
 
-I use a lot of AI coding CLIs — Codex, Claude Code, Pi, OpenCode, Devin,
-Factory, Windsurf Cascade — and wanted to move a session from one tool into another without
-losing the useful conversation history.
+    Local storage formats change between client versions. Conversions use
+    conservative conflict handling and atomic writes, but no guarantee covers
+    every client version, non-standard session, or interrupted run. Validate
+    irreplaceable sessions on a copy first.
 
-I looked for a tool that could convert one AI CLI session into another and
-found nothing, so I built one.
+## Two layers, different maturity
 
-I also wanted my agent to remember things from my other sessions. Like if I
-solved a bug in one project, I wanted to tell it "hey in that other session I
-fixed this by doing X" and it would go check and learn from it instead of me
-explaining the same thing again.
+This project is a fork of [vibheksoni/session-export](https://github.com/vibheksoni/session-export)
+(published upstream as UniSessions). It ships two distinct layers, and they are
+verified to different degrees.
 
-So this does three things:
+### 1. The Codex bridge (this fork's focus)
 
-- **Move sessions** between Codex, Pi, OpenCode, Claude Code, Devin,
-  Factory, and Windsurf Cascade in any direction — all 42 combinations
-- **Export traces** in HuggingFace STS, OpenAI fine-tuning, or ShareGPT
-  format for Hub upload or model training
-- **Search chat history** across all sessions, providers, and projects so
-  your agent can recall what you did before
+Four directions, exercised against real sessions and shipped as a Windows
+single-file exe plus a Python importer:
 
-The project is SDK-first so you can build GUIs or other tools on top. The CLI
-and MCP server are just built on top of the SDK.
+| Direction | Result | Verification status |
+|---|---|---|
+| OpenCode -> Codex | Installed and registered in the Codex history list | :white_check_mark: Import and resume verified with real sessions |
+| Claude Code -> Codex | Installed and registered in the Codex history list | :white_check_mark: Visible after restart and resume verified with real history |
+| Codex -> Claude Code | Written to the Claude Code session directory; desktop list registered when a template exists | :test_tube: Automated tests only; resume not yet verified in a real Claude client |
+| Codex -> OpenCode | Generates an OpenCode export JSON | :test_tube: Automated tests only; requires a manual `opencode import` |
 
-## Features
+Start here: [Installation](installation.md) and [Quick Start](quickstart.md).
 
-### 42 conversion directions
+### 2. The inherited UniSessions SDK
 
-Convert any session to any other format. All seven providers are supported in
-every direction.
+The upstream SDK remains in the repository and still covers seven providers
+(Codex, Pi, OpenCode, Claude Code, Devin, Factory, Windsurf Cascade) across all
+42 direction combinations, plus trace export and MCP chat recall.
 
-| From \ To | Pi | Codex | OpenCode | Claude | Devin | Factory | Windsurf |
-|---|---|---|---|---|---|---|---|
-| **Codex** | ✓ | -- | ✓ | ✓ | ✓ | ✓ | ✓ |
-| **Pi** | -- | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| **OpenCode** | ✓ | ✓ | -- | ✓ | ✓ | ✓ | ✓ |
-| **Claude** | ✓ | ✓ | ✓ | -- | ✓ | ✓ | ✓ |
-| **Devin** | ✓ | ✓ | ✓ | ✓ | -- | ✓ | ✓ |
-| **Factory** | ✓ | ✓ | ✓ | ✓ | ✓ | -- | ✓ |
-| **Windsurf** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | -- |
+!!! note "Inherited surface, lighter verification"
+    The four directions in the table above are what this fork actively tests
+    against real client data. The remaining SDK directions carry upstream's
+    coverage and are documented here as a library reference. Treat them as
+    unverified against current client versions, and always dry-run first.
 
-### Trace export
+The architecture pages describe this layer:
+[Stores](stores.md), [Converters](converters.md), [Models](models.md),
+[Paths](paths.md), [Data Fidelity](data-fidelity.md).
 
-Export sessions as training data in three formats:
+## What is preserved
 
-| Format | Use case |
+Migration moves **visible conversation context**. It does not move accounts,
+subscriptions, model state, permission grants, or cloud session identity.
+
+Preserved: user-visible messages and final assistant replies, conversation
+order, title, original working directory, base timestamps, base64 images
+between Claude Code and Codex, and optional reasoning summaries for
+Codex -> Claude Code.
+
+Not preserved by default: hidden reasoning and signatures, internal tool-call
+chains, tool results, subagent records, approval and sandbox state, and unsupported
+media such as audio. This is deliberate — replaying another runtime's execution
+records as native history causes role mismatches and can break resumability.
+
+## Other capabilities
+
+| Capability | Description |
 |---|---|
-| `sts` | HuggingFace Hub trace viewer |
-| `openai` | OpenAI / Azure fine-tuning JSONL |
-| `sharegpt` | LLaMA-Factory, Axolotl, torchtune |
-
-### MCP chat recall
-
-A FastMCP server exposes a SQLite FTS5 full-text search index over all your
-parsed session chat history. Your AI agent can search across every session
-from every provider to recall past conversations.
-
-### SDK-first
-
-The `session_sdk` package is a standalone library with no CLI dependencies.
-Import stores, converters, and the search engine directly in your own Python
-projects.
+| [Trace export](traces.md) | Export sessions as HuggingFace STS, OpenAI fine-tuning JSONL, or ShareGPT training data |
+| [MCP chat recall](mcp-server.md) | A FastMCP server exposing SQLite FTS5 search over parsed session history so an agent can recall past conversations |
+| [Search](search.md) | The search engine and index behind chat recall |
+| [CLI reference](cli.md) | Full command surface for the inherited multi-provider CLI |
 
 ## Quick install
 
-```bash
-pip install unisessions
-```
+Windows users can download the standalone exe and skip Python entirely:
 
-With extras:
+[:material-download: Download the latest `session-convert.exe`](https://github.com/leNing-sy/codex-session-bridge/releases/latest)
 
-```bash
-pip install "unisessions[mcp,fast]"
-```
-
-## One-liner conversion
+From source:
 
 ```bash
-python -m unisessions codex-to-pi <session-id> --write
+git clone https://github.com/leNing-sy/codex-session-bridge.git
+cd codex-session-bridge
+pip install -e .
 ```
 
-## Stats
-
-- **7 providers**: Codex, Pi, OpenCode, Claude Code, Devin, Factory, Windsurf Cascade
-- **42 conversion directions**: every provider to every other provider
-- **3 trace formats**: HuggingFace STS, OpenAI, ShareGPT
-- **32 tests**: conversion shape, compaction, dry-run safety, search, traces
-- **MIT licensed**: open source, do whatever
+See [Installation](installation.md) for extras and requirements.
 
 ---
 

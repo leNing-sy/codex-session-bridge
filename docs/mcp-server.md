@@ -1,6 +1,8 @@
 # MCP Server
 
-The MCP server exposes UniSessions search and listing capabilities to MCP-compatible AI agents via the Model Context Protocol.
+The MCP server exposes the session search and listing capabilities of the
+inherited UniSessions SDK to MCP-compatible AI agents via the Model Context
+Protocol. The package and console script keep the `unisessions` name.
 
 ## Starting the Server
 

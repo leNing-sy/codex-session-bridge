@@ -1,6 +1,6 @@
 # Trace Export
 
-UniSessions can export any session from any supported provider into three
+The inherited UniSessions SDK can export any session from any supported provider into three
 standard trace formats used for HuggingFace Hub upload, model fine-tuning,
 and training data preparation.
 

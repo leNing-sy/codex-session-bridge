@@ -71,13 +71,19 @@ encode_pi_cwd("C:\\Projects\\myproject")
 
 Steps:
 1. Strip Windows `\\?\` extended-length path prefix if present.
-2. Resolve the path via `Path.resolve()`.
-3. Strip `\\?\` prefix again (resolve may re-add it on Windows).
-4. Strip leading `/` or `\`.
-5. Replace `/`, `\`, and `:` with `-`.
-6. Wrap with `--` prefix and suffix.
+2. Split on both `/` and `\`, dropping empty and `.` segments.
+3. Resolve `..` segments lexically.
+4. Join the remaining segments with `-` and replace `:` with `-`.
+5. Wrap with `--` prefix and suffix.
 
 The `\\?\` prefix stripping is critical because it produces invalid `?` characters in directory names.
+
+!!! important "Normalization is lexical, never filesystem-based"
+    The cwd comes from recorded session history and may describe a different
+    machine. This function does not call `Path.resolve()`: on Windows that
+    rewrites the path to whatever casing exists on the current host, so the same
+    session would encode to different directory names depending on where the
+    conversion runs. Identical input always produces identical output.
 
 ## sanitize_claude_cwd
 

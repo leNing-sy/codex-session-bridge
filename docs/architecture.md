@@ -3,7 +3,7 @@
 ## Package Structure
 
 ```
-session-export/
+codex-session-bridge/
   session_sdk/          # Library package (no CLI dependencies)
     __init__.py         # Public API surface
     converters.py       # 42 converters, MessageExtractor, 6 record builders
@@ -14,21 +14,38 @@ session-export/
     paths.py            # WindowsDefaults, SessionIdFactory, encoding helpers
     search.py           # SessionSearchEngine, SessionSearchIndex, ChatSearchResult
     stores.py           # CodexStore, PiStore, OpenCodeStore, ClaudeStore, DevinStore, FactoryStore, WindsurfStore, PiDcpStore
-  unisessions/          # CLI + MCP server package
+  codex_bridge/         # Codex-focused importer (this fork)
+    __main__.py         # `python -m codex_bridge` entry point
+    cli.py              # codex-bridge console script: list, import, verify
+    codex.py            # Rollout builder, state registration, backup, verify, rollback
+    claude.py           # Claude Code conversation source
+    opencode.py         # OpenCode read-only SQLite source
+    models.py           # Conversation, ImportResult, ValidationResult
+  unisessions/          # Inherited CLI + MCP server package
     __main__.py         # CLI entry point
     cli.py              # CliApp with all commands and flags
     mcp_server.py       # FastMCP stdio/http/sse server
+  scripts/
+    session_convert.py  # Standalone four-direction converter, packaged as the Windows exe
   tests/
-    test_conversion.py  # 32 tests
+    test_conversion.py        # 37 tests
+    test_conversion_fixes.py  # 32 tests
+    test_codex_bridge.py      #  5 tests
 ```
 
 ## Dependency Direction
 
 ```
-unisessions  -->  session_sdk
+unisessions   -->  session_sdk
+codex_bridge  -->  session_sdk
 ```
 
-The SDK never imports from the CLI. This means `session_sdk` can be used as a standalone library in any Python project without pulling in CLI or MCP dependencies.
+The SDK never imports from either CLI. This means `session_sdk` can be used as a standalone library in any Python project without pulling in CLI or MCP dependencies.
+
+`scripts/session_convert.py` is deliberately standalone and imports neither the
+SDK nor `codex_bridge`, so PyInstaller can package it as a single file. The
+tradeoff is that it carries its own copy of the conversion logic; see
+[Data Fidelity](data-fidelity.md) for what each path preserves.
 
 ### Module Dependency Chain
 
