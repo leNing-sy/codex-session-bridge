@@ -1,9 +1,13 @@
+# Manual only. PyPI trusted publishing is not configured for this repository yet,
+# so this workflow fails at the token exchange step (`invalid-publisher`).
+# Before enabling it, register a trusted publisher on PyPI with:
+#   owner: leNing-sy | repository: codex-session-bridge
+#   workflow: publish.yml | environment: pypi
+# Until then the released artifact is the Windows exe from build-exe.yml.
 name: Publish to PyPI
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
