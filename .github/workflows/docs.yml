@@ -1,11 +1,13 @@
+# Manual only. GitHub Pages is not enabled for this repository, so the deploy job
+# fails with `Failed to create deployment (status: 404)` even though the build job
+# succeeds. To restore automatic deployment:
+#   1. Settings > Pages > Source: select "GitHub Actions".
+#   2. Restore the push trigger below.
+# Until step 1 is done, a manual run still ends red: the build job passes and the
+# deploy job then 404s. Read the build job's own conclusion to check the docs.
 name: Deploy Docs
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "docs/**"
-      - "mkdocs.yml"
   workflow_dispatch:
 
 permissions:
