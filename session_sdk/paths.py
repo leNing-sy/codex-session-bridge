@@ -182,20 +182,23 @@ def sanitize_claude_cwd(cwd: str) -> str:
 
 
 def encode_pi_cwd(cwd: str) -> str:
+    """Encode a recorded cwd into Pi's directory naming convention.
+
+    Normalization is purely lexical. The cwd comes from session history and may
+    describe another machine, so it is never resolved against the local
+    filesystem: `Path.resolve()` would rewrite the casing to whatever happens to
+    exist on this host and make the encoding host-dependent.
+    """
     # Strip Windows extended-length path prefix (\\?\) which produces invalid dir chars
     if cwd.startswith("\\\\?\\"):
         cwd = cwd[4:]
-    # Only call resolve() if the path is absolute on the current platform.
-    # On Linux, Path("C:\\home\\user").resolve() treats it as relative and
-    # prepends the cwd, producing a wrong encoding for Windows-style paths.
-    p = Path(cwd)
-    if p.is_absolute():
-        resolved = str(p.resolve())
-        # Path.resolve() may re-add the prefix on Windows; strip again
-        if resolved.startswith("\\\\?\\"):
-            resolved = resolved[4:]
-    else:
-        resolved = cwd
-    stripped = resolved.lstrip("/\\")
-    encoded = stripped.replace("/", "-").replace("\\", "-").replace(":", "-")
+    segments: list[str] = []
+    for segment in cwd.replace("\\", "/").split("/"):
+        if not segment or segment == ".":
+            continue
+        if segment == ".." and segments and segments[-1] != "..":
+            segments.pop()
+            continue
+        segments.append(segment)
+    encoded = "-".join(segments).replace(":", "-")
     return f"--{encoded}--"

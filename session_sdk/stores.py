@@ -317,7 +317,7 @@ class PiStore(SessionStore):
         if not root.exists():
             self._path_cache = []
             return []
-        paths = sorted(path for path in root.rglob("*.jsonl") if "\\tasks\\" not in str(path))
+        paths = sorted(path for path in root.rglob("*.jsonl") if "tasks" not in path.parts)
         self._path_cache = paths
         return paths
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from session_sdk.converters import (
     CodexRecordBuilder,
@@ -28,6 +28,26 @@ class PathTests(unittest.TestCase):
     def test_encode_windows_cwd(self) -> None:
         self.assertEqual(encode_pi_cwd(r"C:\home\user"), "--C--home-user--")
         self.assertEqual(encode_pi_cwd(r"C:\projects\repo"), "--C--projects-repo--")
+
+    def test_encode_cwd_is_host_independent(self) -> None:
+        # cwd comes from session history and may name another machine. Encoding
+        # must not depend on what exists (or with which casing) on this host.
+        existing = Path.cwd()
+        variants = [str(existing), str(existing).swapcase()]
+        for cwd in variants:
+            self.assertEqual(encode_pi_cwd(cwd), encode_pi_cwd(cwd))
+        self.assertNotEqual(
+            encode_pi_cwd(r"C:\projects\repo"),
+            encode_pi_cwd(r"C:\Projects\repo"),
+        )
+        self.assertEqual(encode_pi_cwd(r"C:\nonexistent-xyz\repo"), "--C--nonexistent-xyz-repo--")
+
+    def test_encode_cwd_normalizes_lexically(self) -> None:
+        self.assertEqual(encode_pi_cwd("\\\\?\\C:\\projects\\demo"), "--C--projects-demo--")
+        self.assertEqual(encode_pi_cwd("C:\\a\\b\\"), "--C--a-b--")
+        self.assertEqual(encode_pi_cwd("C:\\a\\.\\b"), "--C--a-b--")
+        self.assertEqual(encode_pi_cwd("C:\\a\\..\\b"), "--C--b--")
+        self.assertEqual(encode_pi_cwd("/home/user/app"), "--home-user-app--")
 
     def test_cross_format_ids_are_stable_when_preserving_ids(self) -> None:
         factory = SessionIdFactory(preserve_ids=True)
@@ -348,6 +368,31 @@ class ConversionTests(unittest.TestCase):
             self.assertEqual(len(codex.list()), 1)
             self.assertEqual(pi.destination_path(session_id, "2026-06-10T23:22:58.000Z", r"C:\home\user").parents[1], pi_session_dir)
             self.assertEqual(opencode.destination_path("ses_test").parent, opencode_session_dir)
+
+    def test_pi_task_sessions_are_excluded_on_any_platform(self) -> None:
+        # The filter must key on a path segment, not on a separator-shaped
+        # substring, so it also applies on POSIX hosts.
+        with tempfile.TemporaryDirectory() as root_name:
+            root = Path(root_name)
+            pi_session_dir = root / "pi-sessions"
+            records = [
+                {
+                    "timestamp": "2026-06-10T23:22:58.000Z",
+                    "type": "session_meta",
+                    "payload": {"id": "x", "timestamp": "2026-06-10T23:22:58.000Z", "cwd": r"C:\home\user"},
+                }
+            ]
+            JsonlFile(pi_session_dir / "normal.jsonl").write(records)
+            JsonlFile(pi_session_dir / "tasks" / "task-session.jsonl").write(records)
+
+            paths = PiStore(root / ".pi" / "agent", pi_session_dir)._session_paths()
+            self.assertEqual([path.name for path in paths], ["normal.jsonl"])
+
+        # The real-filesystem check above only exercises the host's own
+        # separator, so assert separator-independence explicitly: a POSIX-shaped
+        # task path must be excluded even when these tests run on Windows.
+        posix_task = PurePosixPath("/home/u/.pi/agent/sessions/tasks/task.jsonl")
+        self.assertIn("tasks", posix_task.parts)
 
 
 class CompactionTests(unittest.TestCase):
